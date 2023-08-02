@@ -11,10 +11,10 @@
 		"LogRetention": "30",
 		"ContainerPort": "8080",
 		"EnvFileARN": "",
+		"EnvFileARNForfluentbit": "",
 		"TargetContainer": "http-full-config",
-		"TargetPort": "8080",
-		"RulePath": "http-full-config-path",
-		"Stickiness": "true",
+		"TargetPort": "8081",
+		"RulePath": "/http-full-config-path",
 		"HTTPSEnabled": "false"
 	},
 	"Tags": {

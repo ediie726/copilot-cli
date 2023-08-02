@@ -9,9 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/workspace"
-
-	"github.com/aws/copilot-cli/internal/pkg/manifest"
 
 	"github.com/spf13/afero"
 
@@ -38,7 +37,7 @@ var basicNameTestCases = map[string]testCase{
 	},
 	"string with invalid characters": {
 		input: "myProject!",
-		want:  errValueBadFormat,
+		want:  errBasicNameRegexNotMatched,
 	},
 	"empty string": {
 		input: "",
@@ -50,11 +49,11 @@ var basicNameTestCases = map[string]testCase{
 	},
 	"does not start with letter": {
 		input: "123chicken",
-		want:  errValueBadFormat,
+		want:  errBasicNameRegexNotMatched,
 	},
 	"contains upper-case letters": {
 		input: "badGoose",
-		want:  errValueBadFormat,
+		want:  errBasicNameRegexNotMatched,
 	},
 }
 
@@ -63,13 +62,13 @@ func TestValidateAppName(t *testing.T) {
 	testCases := map[string]testCase{
 		"contains emoji": {
 			input: "😀",
-			want:  errValueBadFormat,
+			want:  errBasicNameRegexNotMatched,
 		},
 	}
 
 	for name, tc := range basicNameTestCases {
 		t.Run(name, func(t *testing.T) {
-			got := validateAppName(tc.input)
+			got := validateAppNameString(tc.input)
 
 			require.True(t, errors.Is(got, tc.want))
 		})
@@ -77,7 +76,7 @@ func TestValidateAppName(t *testing.T) {
 
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			got := validateAppName(tc.input)
+			got := validateAppNameString(tc.input)
 
 			require.True(t, errors.Is(got, tc.want))
 		})
@@ -93,7 +92,7 @@ func TestValidateSvcName(t *testing.T) {
 	}{
 		"string as input": {
 			val:     "hello",
-			svcType: manifest.LoadBalancedWebServiceType,
+			svcType: manifestinfo.LoadBalancedWebServiceType,
 			wanted:  nil,
 		},
 		"number as input": {
@@ -102,31 +101,31 @@ func TestValidateSvcName(t *testing.T) {
 		},
 		"string with invalid characters": {
 			val:    "mySvc!",
-			wanted: errValueBadFormat,
+			wanted: errBasicNameRegexNotMatched,
 		},
 		"longer than 40 characters for app runner services": {
 			val:     strings.Repeat("x", 41),
-			svcType: manifest.RequestDrivenWebServiceType,
+			svcType: manifestinfo.RequestDrivenWebServiceType,
 			wanted:  errAppRunnerSvcNameTooLong,
 		},
 		"invalid length string": {
 			val:     strings.Repeat("s", 256),
-			svcType: manifest.LoadBalancedWebServiceType,
+			svcType: manifestinfo.LoadBalancedWebServiceType,
 			wanted:  errValueTooLong,
 		},
 		"does not start with letter": {
 			val:     "123chicken",
-			svcType: manifest.BackendServiceType,
-			wanted:  errValueBadFormat,
+			svcType: manifestinfo.BackendServiceType,
+			wanted:  errBasicNameRegexNotMatched,
 		},
 		"contains upper-case letters": {
 			val:     "badGoose",
-			svcType: manifest.LoadBalancedWebServiceType,
-			wanted:  errValueBadFormat,
+			svcType: manifestinfo.LoadBalancedWebServiceType,
+			wanted:  errBasicNameRegexNotMatched,
 		},
 		"is not a reserved name": {
 			val:     "pipelines",
-			svcType: manifest.LoadBalancedWebServiceType,
+			svcType: manifestinfo.LoadBalancedWebServiceType,
 			wanted:  errValueReserved,
 		},
 	}
@@ -170,7 +169,7 @@ func TestValidatePipelineName(t *testing.T) {
 		},
 		"string with invalid characters": {
 			val:    "myPipe!",
-			wanted: errValueBadFormat,
+			wanted: errBasicNameRegexNotMatched,
 		},
 		"longer than 128 characters": {
 			val:               strings.Repeat("s", 129),
@@ -183,15 +182,15 @@ func TestValidatePipelineName(t *testing.T) {
 		},
 		"does not start with letter": {
 			val:    "123chicken",
-			wanted: errValueBadFormat,
+			wanted: errBasicNameRegexNotMatched,
 		},
 		"starts with a dash": {
 			val:    "-beta",
-			wanted: errValueBadFormat,
+			wanted: errBasicNameRegexNotMatched,
 		},
 		"contains upper-case letters": {
 			val:    "badGoose",
-			wanted: errValueBadFormat,
+			wanted: errBasicNameRegexNotMatched,
 		},
 	}
 
@@ -893,7 +892,7 @@ func Test_validateSubscriptionKey(t *testing.T) {
 		},
 		"error when bad svc name": {
 			inSub:   "n#######:topic",
-			wantErr: fmt.Errorf("invalid topic subscription service name `n#######`: %w", errValueBadFormat),
+			wantErr: fmt.Errorf("invalid topic subscription service name `n#######`: %w", errBasicNameRegexNotMatched),
 		},
 	}
 	for name, tc := range testCases {

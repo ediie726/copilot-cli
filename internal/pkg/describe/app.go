@@ -13,24 +13,25 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/aws/codepipeline"
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
 	"github.com/aws/copilot-cli/internal/pkg/config"
-	"github.com/aws/copilot-cli/internal/pkg/deploy"
 	cfnstack "github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/describe/stack"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v3"
 )
 
 // App contains serialized parameters for an application.
 type App struct {
-	Name               string                   `json:"name"`
-	Version            string                   `json:"version"`
-	URI                string                   `json:"uri"`
-	Envs               []*config.Environment    `json:"environments"`
-	Services           []*config.Workload       `json:"services"`
-	Jobs               []*config.Workload       `json:"jobs"`
-	Pipelines          []*codepipeline.Pipeline `json:"pipelines"`
-	WkldDeployedtoEnvs map[string][]string      `json:"-"`
+	Name                string                   `json:"name"`
+	Version             string                   `json:"version"`
+	URI                 string                   `json:"uri"`
+	PermissionsBoundary string                   `json:"permissionsBoundary"`
+	Envs                []*config.Environment    `json:"environments"`
+	Services            []*config.Workload       `json:"services"`
+	Jobs                []*config.Workload       `json:"jobs"`
+	Pipelines           []*codepipeline.Pipeline `json:"pipelines"`
+	WkldDeployedtoEnvs  map[string][]string      `json:"-"`
 }
 
 // JSONString returns the stringified App struct with json format.
@@ -49,12 +50,15 @@ func (a *App) HumanString() string {
 	fmt.Fprint(writer, color.Bold.Sprint("About\n\n"))
 	writer.Flush()
 	fmt.Fprintf(writer, "  %s\t%s\n", "Name", a.Name)
-	availableVersion := ""
-	if deploy.LatestAppTemplateVersion != a.Version {
-		availableVersion = color.Yellow.Sprintf("(latest available: %s)", deploy.LatestAppTemplateVersion)
+	if a.URI == "" {
+		a.URI = "N/A"
 	}
-	fmt.Fprintf(writer, "  %s\t%s %s\n", "Version", a.Version, availableVersion)
+	if a.PermissionsBoundary == "" {
+		a.PermissionsBoundary = "N/A"
+	}
+	fmt.Fprintf(writer, "  %s\t%s\n", "Version", a.Version)
 	fmt.Fprintf(writer, "  %s\t%s\n", "URI", a.URI)
+	fmt.Fprintf(writer, "  %s\t%s\n", "Permissions Boundary", a.PermissionsBoundary)
 	fmt.Fprint(writer, color.Bold.Sprint("\nEnvironments\n\n"))
 	writer.Flush()
 	headers := []string{"Name", "AccountID", "Region"}
@@ -120,7 +124,7 @@ func NewAppDescriber(appName string) (*AppDescriber, error) {
 // Specifically it will get both app CFN stack template version and app StackSet template version,
 // and return the minimum as the current app version.
 //
-// If the Version field does not exist, then it's a legacy template and it returns an deploy.LegacyAppTemplateVersion and nil error.
+// If the Version field does not exist, then it's a legacy template and it returns an deploy.LegacyAppTemplate and nil error.
 func (d *AppDescriber) Version() (string, error) {
 	type metadata struct {
 		TemplateVersion string `yaml:"TemplateVersion"`
@@ -136,7 +140,7 @@ func (d *AppDescriber) Version() (string, error) {
 	}
 	appStackVersion := stackMetadata.TemplateVersion
 	if appStackVersion == "" {
-		appStackVersion = deploy.LegacyAppTemplateVersion
+		appStackVersion = version.LegacyAppTemplate
 	}
 
 	appStackSetMetadata, err := d.stackSetDescriber.StackSetMetadata()
@@ -148,7 +152,7 @@ func (d *AppDescriber) Version() (string, error) {
 	}
 	appStackSetVersion := stackSetMetadata.TemplateVersion
 	if appStackSetVersion == "" {
-		appStackSetVersion = deploy.LegacyAppTemplateVersion
+		appStackSetVersion = version.LegacyAppTemplate
 	}
 
 	minVersion := appStackVersion

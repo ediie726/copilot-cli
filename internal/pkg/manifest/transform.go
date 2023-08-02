@@ -6,6 +6,7 @@ package manifest
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/imdario/mergo"
@@ -23,9 +24,10 @@ var defaultTransformers = []mergo.Transformers{
 	stringSliceOrStringTransformer{},
 	platformArgsOrStringTransformer{},
 	securityGroupsIDsOrConfigTransformer{},
+	serviceConnectTransformer{},
 	placementArgOrStringTransformer{},
 	subnetListOrArgsTransformer{},
-	healthCheckArgsOrStringTransformer{},
+	unionTransformer{},
 	countTransformer{},
 	advancedCountTransformer{},
 	scalingConfigOrTTransformer[Percentage]{},
@@ -35,7 +37,7 @@ var defaultTransformers = []mergo.Transformers{
 	efsConfigOrBoolTransformer{},
 	efsVolumeConfigurationTransformer{},
 	sqsQueueOrBoolTransformer{},
-	routingRuleConfigOrBoolTransformer{},
+	httpOrBoolTransformer{},
 	secretTransformer{},
 	environmentCDNConfigTransformer{},
 }
@@ -238,6 +240,32 @@ func (t placementArgOrStringTransformer) Transformer(typ reflect.Type) func(dst,
 	}
 }
 
+type serviceConnectTransformer struct{}
+
+// Transformer returns custom merge logic for serviceConnectTransformer's fields.
+func (t serviceConnectTransformer) Transformer(typ reflect.Type) func(dst, src reflect.Value) error {
+	if typ != reflect.TypeOf(ServiceConnectBoolOrArgs{}) {
+		return nil
+	}
+
+	return func(dst, src reflect.Value) error {
+		dstStruct, srcStruct := dst.Interface().(ServiceConnectBoolOrArgs), src.Interface().(ServiceConnectBoolOrArgs)
+
+		if srcStruct.EnableServiceConnect != nil {
+			dstStruct.ServiceConnectArgs = ServiceConnectArgs{}
+		}
+
+		if !srcStruct.ServiceConnectArgs.isEmpty() {
+			dstStruct.EnableServiceConnect = nil
+		}
+
+		if dst.CanSet() { // For extra safety to prevent panicking.
+			dst.Set(reflect.ValueOf(dstStruct))
+		}
+		return nil
+	}
+}
+
 type subnetListOrArgsTransformer struct{}
 
 // Transformer returns custom merge logic for subnetListOrArgsTransformer's fields.
@@ -264,28 +292,45 @@ func (t subnetListOrArgsTransformer) Transformer(typ reflect.Type) func(dst, src
 	}
 }
 
-type healthCheckArgsOrStringTransformer struct{}
+type unionTransformer struct{}
 
-// Transformer returns custom merge logic for HealthCheckArgsOrString's fields.
-func (t healthCheckArgsOrStringTransformer) Transformer(typ reflect.Type) func(dst, src reflect.Value) error {
-	if typ != reflect.TypeOf(HealthCheckArgsOrString{}) {
+var unionPrefix, _, _ = strings.Cut(reflect.TypeOf(Union[any, any]{}).String(), "[")
+
+// Transformer returns custom merge logic for union types.
+func (t unionTransformer) Transformer(typ reflect.Type) func(dst, src reflect.Value) error {
+	// :sweat_smile: https://github.com/golang/go/issues/54393
+	// reflect currently doesn't have support for getting type parameters
+	// or checking if a type is a non-specific instantiation of a generic type
+	// (i.e., no way to tell if the type Union[string, bool] is a Union)
+	isUnion := strings.HasPrefix(typ.String(), unionPrefix)
+	if !isUnion {
 		return nil
 	}
 
-	return func(dst, src reflect.Value) error {
-		dstStruct, srcStruct := dst.Interface().(HealthCheckArgsOrString), src.Interface().(HealthCheckArgsOrString)
+	return func(dst, src reflect.Value) (err error) {
+		defer func() {
+			// should realistically never happen unless Union type code has been
+			// refactored to change functions called via reflection.
+			if r := recover(); r != nil {
+				err = fmt.Errorf("override union: %v", r)
+			}
+		}()
 
-		if srcStruct.HealthCheckPath != nil {
-			dstStruct.HealthCheckArgs = HTTPHealthCheckArgs{}
+		isBasic := src.MethodByName("IsBasic").Call(nil)[0].Bool()
+		isAdvanced := src.MethodByName("IsAdvanced").Call(nil)[0].Bool()
+
+		// Call SetType with the correct type based on src's type.
+		// We use the value from dst because it holds the merged value.
+		if isBasic {
+			if dst.CanAddr() {
+				dst.Addr().MethodByName("SetBasic").Call([]reflect.Value{dst.FieldByName("Basic")})
+			}
+		} else if isAdvanced {
+			if dst.CanAddr() {
+				dst.Addr().MethodByName("SetAdvanced").Call([]reflect.Value{dst.FieldByName("Advanced")})
+			}
 		}
 
-		if !srcStruct.HealthCheckArgs.isEmpty() {
-			dstStruct.HealthCheckPath = nil
-		}
-
-		if dst.CanSet() { // For extra safety to prevent panicking.
-			dst.Set(reflect.ValueOf(dstStruct))
-		}
 		return nil
 	}
 }
@@ -468,22 +513,22 @@ func (q sqsQueueOrBoolTransformer) Transformer(typ reflect.Type) func(dst, src r
 	}
 }
 
-type routingRuleConfigOrBoolTransformer struct{}
+type httpOrBoolTransformer struct{}
 
-// Transformer returns custom merge logic for RoutingRuleConfigOrBool's fields.
-func (t routingRuleConfigOrBoolTransformer) Transformer(typ reflect.Type) func(dst, src reflect.Value) error {
-	if typ != reflect.TypeOf(RoutingRuleConfigOrBool{}) {
+// Transformer returns custom merge logic for HTTPOrBool's fields.
+func (t httpOrBoolTransformer) Transformer(typ reflect.Type) func(dst, src reflect.Value) error {
+	if typ != reflect.TypeOf(HTTPOrBool{}) {
 		return nil
 	}
 	return func(dst, src reflect.Value) error {
-		dstStruct, srcStruct := dst.Interface().(RoutingRuleConfigOrBool), src.Interface().(RoutingRuleConfigOrBool)
+		dstStruct, srcStruct := dst.Interface().(HTTPOrBool), src.Interface().(HTTPOrBool)
 
-		if !srcStruct.RoutingRuleConfiguration.IsEmpty() {
+		if !srcStruct.HTTP.IsEmpty() {
 			dstStruct.Enabled = nil
 		}
 
 		if srcStruct.Enabled != nil {
-			dstStruct.RoutingRuleConfiguration = RoutingRuleConfiguration{}
+			dstStruct.HTTP = HTTP{}
 		}
 
 		if dst.CanSet() { // For extra safety to prevent panicking.
@@ -504,10 +549,10 @@ func (t secretTransformer) Transformer(typ reflect.Type) func(dst, src reflect.V
 		dstStruct, srcStruct := dst.Interface().(Secret), src.Interface().(Secret)
 
 		if !srcStruct.fromSecretsManager.IsEmpty() {
-			dstStruct.from = nil
+			dstStruct.from = stringOrFromCFN{}
 		}
 
-		if srcStruct.from != nil {
+		if !srcStruct.from.isEmpty() {
 			dstStruct.fromSecretsManager = secretsManagerSecret{}
 		}
 
@@ -522,19 +567,19 @@ type environmentCDNConfigTransformer struct{}
 
 // Transformer returns custom merge logic for environmentCDNConfig's fields.
 func (t environmentCDNConfigTransformer) Transformer(typ reflect.Type) func(dst, src reflect.Value) error {
-	if typ != reflect.TypeOf(environmentCDNConfig{}) {
+	if typ != reflect.TypeOf(EnvironmentCDNConfig{}) {
 		return nil
 	}
 
 	return func(dst, src reflect.Value) error {
-		dstStruct, srcStruct := dst.Interface().(environmentCDNConfig), src.Interface().(environmentCDNConfig)
+		dstStruct, srcStruct := dst.Interface().(EnvironmentCDNConfig), src.Interface().(EnvironmentCDNConfig)
 
 		if !srcStruct.Config.isEmpty() {
 			dstStruct.Enabled = nil
 		}
 
 		if srcStruct.Enabled != nil {
-			dstStruct.Config = advancedCDNConfig{}
+			dstStruct.Config = AdvancedCDNConfig{}
 		}
 
 		if dst.CanSet() { // For extra safety to prevent panicking.

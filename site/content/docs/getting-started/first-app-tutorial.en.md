@@ -4,7 +4,7 @@ Sound fun? Let’s do it!
 
 ## Step 1: Download & Configure AWS Copilot
 
-You’ll need a few things to use AWS Copilot - the AWS Copilot binary, AWS CLI, Docker Desktop and AWS credentials.
+You’ll need a few things to use AWS Copilot - the AWS Copilot binary, AWS CLI, Docker Desktop (needs to be running) and AWS credentials.
 
 Follow our instructions here on how to set up and configure all these tools.
 
@@ -25,6 +25,9 @@ $ cd example
 ## Step 3: Set up our app
 
 Now this is where the fun starts! We have our service code and our Dockerfile and we want to get it deployed to AWS. Let’s have AWS Copilot help us do just that!
+
+!!! Attention
+    If you have an existing `copilot/` directory that you created for other purposes, you may find Copilot creating files in that directory. If this happens, you can make an empty directory also named `copilot/` closer to your working directory. Copilot will use this empty directory instead.
 
 From within your code directory run:
 

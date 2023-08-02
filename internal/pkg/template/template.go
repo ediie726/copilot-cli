@@ -18,7 +18,7 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/template/artifactpath"
 )
 
-//go:embed templates
+//go:embed templates templates/overrides/cdk/.gitignore
 var templateFS embed.FS
 
 // File names under "templates/".
@@ -28,13 +28,14 @@ const (
 	DNSDelegationFileName               = "dns-delegation"
 	CustomDomainFileName                = "custom-domain"
 	AppRunnerCustomDomainLambdaFileName = "custom-domain-app-runner"
-	NLBCertValidatorLambdaFileName      = "nlb-cert-validator"
-	NLBCustomDomainLambdaFileName       = "nlb-custom-domain"
 
 	customResourceRootPath         = "custom-resources"
 	customResourceZippedScriptName = "index.js"
 	scriptDirName                  = "scripts"
 )
+
+// AddonsStackLogicalID is the logical ID for the addon stack resource in the main template.
+const AddonsStackLogicalID = "AddonsStack"
 
 // Groups of files that belong to the same stack.
 var (
@@ -84,9 +85,14 @@ type fileToCompress struct {
 	uploadables []Uploadable
 }
 
+type osFS interface {
+	fs.ReadDirFS
+	fs.ReadFileFS
+}
+
 // Template represents the "/templates/" directory that holds static files to be embedded in the binary.
 type Template struct {
-	fs fs.ReadFileFS
+	fs osFS
 }
 
 // New returns a Template object that can be used to parse files under the "/templates/" directory.
@@ -232,4 +238,35 @@ func (t *Template) parse(name, path string, options ...ParseOption) (*template.T
 		return nil, fmt.Errorf("parse template %s: %w", path, err)
 	}
 	return parsedTpl, nil
+}
+
+// WalkDirFunc is the type of the function called by any Walk functions while visiting each file under a directory.
+type WalkDirFunc func(name string, content *Content) error
+
+func (t *Template) walkDir(basePath, curPath string, data any, fn WalkDirFunc, parseOpts ...ParseOption) error {
+	entries, err := t.fs.ReadDir(path.Join("templates", curPath))
+	if err != nil {
+		return fmt.Errorf("read dir %q: %w", curPath, err)
+	}
+	for _, entry := range entries {
+		targetPath := path.Join(curPath, entry.Name())
+		if entry.IsDir() {
+			if err := t.walkDir(basePath, targetPath, data, fn); err != nil {
+				return err
+			}
+			continue
+		}
+		content, err := t.Parse(targetPath, data, parseOpts...)
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(basePath, targetPath)
+		if err != nil {
+			return err
+		}
+		if err := fn(relPath, content); err != nil {
+			return err
+		}
+	}
+	return nil
 }

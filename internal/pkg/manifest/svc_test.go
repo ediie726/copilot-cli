@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,8 @@ cpu: 512
 memory: 1024
 count: 1
 exec: true
+network:
+  connect: true
 http:
   path: "svc"
   target_container: "frontend"
@@ -59,6 +62,16 @@ sidecars:
     port: 2000/udp
     image: 123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon
     credentialsParameter: some arn
+  nginx:
+    image:
+      build:
+        dockerfile: "web/Dockerfile"
+        context: "pathto/Dockerfile"
+        target: "build-stage"
+        cache_from:
+          - foo/bar:latest
+        args:
+          arg1: value1
 logging:
   destination:
     Name: cloudwatch
@@ -90,31 +103,34 @@ environments:
 				actualManifest, ok := i.(*LoadBalancedWebService)
 				require.True(t, ok)
 				wantedManifest := &LoadBalancedWebService{
-					Workload: Workload{Name: aws.String("frontend"), Type: aws.String(LoadBalancedWebServiceType)},
+					Workload: Workload{Name: aws.String("frontend"), Type: aws.String(manifestinfo.LoadBalancedWebServiceType)},
 					LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
 						ImageConfig: ImageWithPortAndHealthcheck{
-							ImageWithPort: ImageWithPort{Image: Image{Build: BuildArgsOrString{},
-								Location:    aws.String("foo/bar"),
+							ImageWithPort: ImageWithPort{Image: Image{
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build:    BuildArgsOrString{},
+									Location: aws.String("foo/bar"),
+								},
 								Credentials: aws.String("some arn"),
 							}, Port: aws.Uint16(80)},
 						},
-						RoutingRule: RoutingRuleConfigOrBool{
-							RoutingRuleConfiguration: RoutingRuleConfiguration{
-								Alias: Alias{
-									AdvancedAliases: []AdvancedAlias{},
-									StringSliceOrString: StringSliceOrString{
-										StringSlice: []string{
-											"foobar.com",
-											"v1.foobar.com",
+						HTTPOrBool: HTTPOrBool{
+							HTTP: HTTP{
+								Main: RoutingRule{
+									Alias: Alias{
+										AdvancedAliases: []AdvancedAlias{},
+										StringSliceOrString: StringSliceOrString{
+											StringSlice: []string{
+												"foobar.com",
+												"v1.foobar.com",
+											},
 										},
 									},
+									Path:             aws.String("svc"),
+									TargetContainer:  aws.String("frontend"),
+									HealthCheck:      HealthCheckArgsOrString{},
+									AllowedSourceIps: []IPNet{IPNet("10.1.0.0/24"), IPNet("10.1.1.0/24")},
 								},
-								Path:            aws.String("svc"),
-								TargetContainer: aws.String("frontend"),
-								HealthCheck: HealthCheckArgsOrString{
-									HealthCheckPath: nil,
-								},
-								AllowedSourceIps: []IPNet{IPNet("10.1.0.0/24"), IPNet("10.1.1.0/24")},
 							},
 						},
 						TaskConfig: TaskConfig{
@@ -123,24 +139,49 @@ environments:
 							Count: Count{
 								Value: aws.Int(1),
 								AdvancedCount: AdvancedCount{
-									workloadType: LoadBalancedWebServiceType,
+									workloadType: manifestinfo.LoadBalancedWebServiceType,
 								},
 							},
 							ExecuteCommand: ExecuteCommand{
 								Enable: aws.Bool(true),
 							},
-							Variables: map[string]string{
-								"LOG_LEVEL": "WARN",
+							Variables: map[string]Variable{
+								"LOG_LEVEL": {
+									stringOrFromCFN{
+										Plain: stringP("WARN"),
+									},
+								},
 							},
 							Secrets: map[string]Secret{
-								"DB_PASSWORD": {from: aws.String("MYSQL_DB_PASSWORD")},
+								"DB_PASSWORD": {
+									from: stringOrFromCFN{
+										Plain: aws.String("MYSQL_DB_PASSWORD"),
+									},
+								},
 							},
 						},
 						Sidecars: map[string]*SidecarConfig{
 							"xray": {
 								Port:       aws.String("2000/udp"),
-								Image:      aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+								Image:      BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 								CredsParam: aws.String("some arn"),
+							},
+							"nginx": {
+								Image: AdvancedToUnion[*string](
+									ImageLocationOrBuild{
+										Build: BuildArgsOrString{
+											BuildArgs: DockerBuildArgs{
+												Dockerfile: aws.String("web/Dockerfile"),
+												Context:    aws.String("pathto/Dockerfile"),
+												Target:     aws.String("build-stage"),
+												CacheFrom:  []string{"foo/bar:latest"},
+												Args: map[string]string{
+													"arg1": "value1",
+												},
+											},
+										},
+									},
+								),
 							},
 						},
 						Logging: Logging{
@@ -152,7 +193,11 @@ environments:
 							EnableMetadata: aws.Bool(false),
 							ConfigFile:     aws.String("/extra.conf"),
 							SecretOptions: map[string]Secret{
-								"LOG_TOKEN": {from: aws.String("LOG_TOKEN")},
+								"LOG_TOKEN": {
+									from: stringOrFromCFN{
+										Plain: aws.String("LOG_TOKEN"),
+									},
+								},
 							},
 						},
 						Network: NetworkConfig{
@@ -160,6 +205,9 @@ environments:
 								Placement: PlacementArgOrString{
 									PlacementString: placementStringP(PublicSubnetPlacement),
 								},
+							},
+							Connect: ServiceConnectBoolOrArgs{
+								EnableServiceConnect: aws.Bool(true),
 							},
 						},
 						TaskDefOverrides: []OverrideRule{
@@ -244,14 +292,16 @@ secrets:
 				wantedManifest := &BackendService{
 					Workload: Workload{
 						Name: aws.String("subscribers"),
-						Type: aws.String(BackendServiceType),
+						Type: aws.String(manifestinfo.BackendServiceType),
 					},
 					BackendServiceConfig: BackendServiceConfig{
 						ImageConfig: ImageWithHealthcheckAndOptionalPort{
 							ImageWithOptionalPort: ImageWithOptionalPort{
 								Image: Image{
-									Build: BuildArgsOrString{
-										BuildString: aws.String("./subscribers/Dockerfile"),
+									ImageLocationOrBuild: ImageLocationOrBuild{
+										Build: BuildArgsOrString{
+											BuildString: aws.String("./subscribers/Dockerfile"),
+										},
 									},
 								},
 								Port: aws.Uint16(8080),
@@ -266,14 +316,18 @@ secrets:
 							Count: Count{
 								Value: aws.Int(1),
 								AdvancedCount: AdvancedCount{
-									workloadType: BackendServiceType,
+									workloadType: manifestinfo.BackendServiceType,
 								},
 							},
 							ExecuteCommand: ExecuteCommand{
 								Enable: aws.Bool(false),
 							},
 							Secrets: map[string]Secret{
-								"API_TOKEN": {from: aws.String("SUBS_API_TOKEN")},
+								"API_TOKEN": {
+									from: stringOrFromCFN{
+										Plain: aws.String("SUBS_API_TOKEN"),
+									},
+								},
 							},
 						},
 						Network: NetworkConfig{
@@ -284,6 +338,7 @@ secrets:
 							},
 						},
 					},
+					Environments: map[string]*BackendServiceConfig{},
 				}
 				require.Equal(t, wantedManifest, actualManifest)
 			},
@@ -318,13 +373,15 @@ subscribe:
 				wantedManifest := &WorkerService{
 					Workload: Workload{
 						Name: aws.String("dogcategorizer"),
-						Type: aws.String(WorkerServiceType),
+						Type: aws.String(manifestinfo.WorkerServiceType),
 					},
 					WorkerServiceConfig: WorkerServiceConfig{
 						ImageConfig: ImageWithHealthcheck{
 							Image: Image{
-								Build: BuildArgsOrString{
-									BuildString: aws.String("./dogcategorizer/Dockerfile"),
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build: BuildArgsOrString{
+										BuildString: aws.String("./dogcategorizer/Dockerfile"),
+									},
 								},
 							},
 						},
@@ -334,7 +391,7 @@ subscribe:
 							Count: Count{
 								Value: aws.Int(1),
 								AdvancedCount: AdvancedCount{
-									workloadType: WorkerServiceType,
+									workloadType: manifestinfo.WorkerServiceType,
 								},
 							},
 							ExecuteCommand: ExecuteCommand{
@@ -372,6 +429,7 @@ subscribe:
 							},
 						},
 					},
+					Environments: map[string]*WorkerServiceConfig{},
 				}
 				require.Equal(t, wantedManifest, actualManifest)
 			},
@@ -394,6 +452,64 @@ type: 'OH NO'
 			} else {
 				require.NoError(t, err)
 				tc.requireCorrectValues(t, m.Manifest())
+			}
+		})
+	}
+}
+
+func TestStringOrFromCFN_UnmarshalYAML(t *testing.T) {
+	type mockField struct {
+		stringOrFromCFN
+	}
+	type mockParentField struct {
+		MockField mockField `yaml:"mock_field"`
+	}
+	testCases := map[string]struct {
+		in          []byte
+		wanted      mockParentField
+		wantedError error
+	}{
+		"unmarshal plain string": {
+			in: []byte(`mock_field: hey`),
+			wanted: mockParentField{
+				MockField: mockField{
+					stringOrFromCFN{
+						Plain: aws.String("hey"),
+					},
+				},
+			},
+		},
+		"unmarshal import name": {
+			in: []byte(`mock_field:
+  from_cfn: yo`),
+			wanted: mockParentField{
+				MockField: mockField{
+					stringOrFromCFN{
+						FromCFN: fromCFN{
+							Name: aws.String("yo"),
+						},
+					},
+				},
+			},
+		},
+		"nothing to unmarshal": {
+			in: []byte(`other_field: yo`),
+		},
+		"fail to unmarshal": {
+			in: []byte(`mock_field:
+  heyyo: !`),
+			wantedError: errors.New(`cannot unmarshal field to a string or into a map`),
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			var s mockParentField
+			err := yaml.Unmarshal(tc.in, &s)
+			if tc.wantedError != nil {
+				require.EqualError(t, err, tc.wantedError.Error())
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.wanted, s)
 			}
 		})
 	}
@@ -630,68 +746,6 @@ func TestRange_Parse(t *testing.T) {
 	}
 }
 
-func Test_ServiceDockerfileBuildRequired(t *testing.T) {
-	testCases := map[string]struct {
-		svc interface{}
-
-		wanted    bool
-		wantedErr error
-	}{
-		"invalid type": {
-			svc: struct{}{},
-
-			wantedErr: fmt.Errorf("manifest does not have required methods BuildRequired()"),
-		},
-		"fail to check": {
-			svc: &LoadBalancedWebService{},
-
-			wantedErr: fmt.Errorf("check if manifest requires building from local Dockerfile: either \"image.build\" or \"image.location\" needs to be specified in the manifest"),
-		},
-		"success with false": {
-			svc: &LoadBalancedWebService{
-				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
-					ImageConfig: ImageWithPortAndHealthcheck{
-						ImageWithPort: ImageWithPort{
-							Image: Image{
-								Location: aws.String("mockLocation"),
-							},
-						},
-					},
-				},
-			},
-		},
-		"success with true": {
-			svc: &LoadBalancedWebService{
-				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
-					ImageConfig: ImageWithPortAndHealthcheck{
-						ImageWithPort: ImageWithPort{
-							Image: Image{
-								Build: BuildArgsOrString{
-									BuildString: aws.String("mockDockerfile"),
-								},
-							},
-						},
-					},
-				},
-			},
-			wanted: true,
-		},
-	}
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-
-			got, err := DockerfileBuildRequired(tc.svc)
-
-			if tc.wantedErr != nil {
-				require.EqualError(t, err, tc.wantedErr.Error())
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, tc.wanted, got)
-			}
-		})
-	}
-}
-
 func TestCount_Desired(t *testing.T) {
 	mockRange := IntRangeBand("1-10")
 	testCases := map[string]struct {
@@ -765,15 +819,13 @@ func TestHealthCheckArgsOrString_IsEmpty(t *testing.T) {
 		},
 		"should return false if a path is set via the basic configuration": {
 			hc: HealthCheckArgsOrString{
-				HealthCheckPath: aws.String("/"),
+				Union: BasicToUnion[string, HTTPHealthCheckArgs]("/"),
 			},
 			wanted: false,
 		},
 		"should return false if a value is set via the advanced configuration": {
 			hc: HealthCheckArgsOrString{
-				HealthCheckArgs: HTTPHealthCheckArgs{
-					Path: aws.String("/"),
-				},
+				Union: BasicToUnion[string, HTTPHealthCheckArgs]("/"),
 			},
 			wanted: false,
 		},
@@ -781,7 +833,7 @@ func TestHealthCheckArgsOrString_IsEmpty(t *testing.T) {
 
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			require.Equal(t, tc.wanted, tc.hc.IsEmpty())
+			require.Equal(t, tc.wanted, tc.hc.IsZero())
 		})
 	}
 }
@@ -876,6 +928,106 @@ func TestParsePortMapping(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, gotPort, tc.wantedPort)
 				require.Equal(t, gotProtocol, tc.wantedProtocol)
+			}
+		})
+	}
+}
+
+func TestLoadBalancedWebService_NetworkLoadBalancerTarget(t *testing.T) {
+	testCases := map[string]struct {
+		in                    LoadBalancedWebService
+		wantedTargetContainer []string
+		wantedTargetPort      []string
+		wantedErr             error
+	}{
+		"should return primary container name/nlb port as targetContainer/targetPort in case targetContainer and targetPort is not given ": {
+			in: LoadBalancedWebService{
+				Workload: Workload{
+					Name: aws.String("foo"),
+					Type: aws.String("Load Balanced WebService"),
+				},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: ImageWithPortAndHealthcheck{},
+					NLBConfig: NetworkLoadBalancerConfiguration{
+						Listener: NetworkLoadBalancerListener{
+							Port: aws.String("80/tcp"),
+						},
+						AdditionalListeners: []NetworkLoadBalancerListener{
+							{
+								Port: aws.String("81/tcp"),
+							},
+						},
+					},
+				},
+			},
+			wantedTargetContainer: []string{"foo", "foo"},
+			wantedTargetPort:      []string{"80", "81"},
+		},
+		"should return targetContainer and targetPort as is if they are given ": {
+			in: LoadBalancedWebService{
+				Workload: Workload{
+					Name: aws.String("foo"),
+					Type: aws.String("Load Balanced WebService"),
+				},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: ImageWithPortAndHealthcheck{},
+					NLBConfig: NetworkLoadBalancerConfiguration{
+						Listener: NetworkLoadBalancerListener{
+							Port:            aws.String("80/tcp"),
+							TargetPort:      aws.Int(81),
+							TargetContainer: aws.String("bar"),
+						},
+						AdditionalListeners: []NetworkLoadBalancerListener{
+							{
+								Port:            aws.String("82/tcp"),
+								TargetPort:      aws.Int(83),
+								TargetContainer: aws.String("nginx"),
+							},
+						},
+					},
+					Sidecars: map[string]*SidecarConfig{
+						"bar": {
+							Port: aws.String("8080"),
+						},
+						"nginx": {
+							Port: aws.String("8081"),
+						},
+					},
+				},
+			},
+			wantedTargetContainer: []string{"bar", "nginx"},
+			wantedTargetPort:      []string{"81", "83"},
+		},
+		"should return error if targetPort is of incorrect type": {
+			in: LoadBalancedWebService{
+				Workload: Workload{
+					Name: aws.String("foo"),
+					Type: aws.String("Load Balanced WebService"),
+				},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: ImageWithPortAndHealthcheck{},
+					NLBConfig: NetworkLoadBalancerConfiguration{
+						Listener: NetworkLoadBalancerListener{
+							Port: aws.String("80/80/80"),
+						},
+					},
+				},
+			},
+			wantedErr: errors.New(`cannot parse port mapping from 80/80/80`),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			exposedPorts, _ := tc.in.ExposedPorts()
+			for idx, listener := range tc.in.NLBConfig.NLBListeners() {
+				targetContainer, targetPort, err := listener.Target(exposedPorts)
+				if tc.wantedErr != nil {
+					require.EqualError(t, err, tc.wantedErr.Error())
+				} else {
+					require.Equal(t, tc.wantedTargetContainer[idx], targetContainer)
+					require.Equal(t, tc.wantedTargetPort[idx], targetPort)
+				}
 			}
 		})
 	}

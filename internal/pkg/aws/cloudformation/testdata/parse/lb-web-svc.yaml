@@ -140,6 +140,10 @@ Resources:
       DeploymentConfiguration:
         MinimumHealthyPercent: 100
         MaximumPercent: 200
+        Alarms:
+          AlarmNames: []
+          Enable: false
+          Rollback: true
       # This may need to be adjusted if the container takes a while to start up
       HealthCheckGracePeriodSeconds: 60
       LoadBalancers:
@@ -162,7 +166,7 @@ Resources:
         - Key: deregistration_delay.timeout_seconds
           Value: 60
         - Key: stickiness.enabled
-          Value: !Ref Stickiness
+          Value: true
       TargetType: ip
       VpcId:
         Fn::ImportValue:

@@ -3,7 +3,8 @@
 <a id="nlb" href="#nlb" class="field">`nlb`</a> <span class="type">Map</span>  
 nlb セクションは Service を Network Load Balancer と統合するためのパラメーターを含みます。
 
-Network Load Balancerは、`nlb` フィールドを指定した場合のみ有効になります。Load-Balanced Web Service では、Application Load Balancer と Network Load Balancer のいずれかが有効になっている必要があることに注意してください。
+Network Load Balancerは、`nlb` フィールドを指定した場合のみ有効になります。
+Load Balanced Web Service では、Application Load Balancer と Network Load Balancer のいずれかが有効になっている必要があることに注意してください。
 
 <span class="parent-field">nlb.</span><a id="nlb-port" href="#nlb-port" class="field">`port`</a> <span class="type">String</span>  
 必須項目。Network Load Balancer がリッスンするポートとプロトコルを指定します。
@@ -49,6 +50,9 @@ unhealthy なターゲットを healthy とみなすために必要な、連続�
 <span class="parent-field">nlb.healthcheck.</span><a id="nlb-healthcheck-unhealthy-threshold" href="#nlb-healthcheck-unhealthy-threshold" class="field">`unhealthy_threshold`</a> <span class="type">Integer</span>  
 ターゲットが unhealthy であると判断するまでに必要な、連続したヘルスチェックの失敗回数を指定します。デフォルト値は 3 で、設定可能な範囲は、2 〜 10 です。
 
+<span class="parent-field">nlb.healthcheck.</span><a id="nlb-healthcheck-grace-period" href="#nlb-healthcheck-grace-period" class="field">`grace_period`</a> <span class="type">Duration</span>  
+コンテナ起動時にターゲットグループのヘルスチェックが失敗した場合の、それを無視する時間を指定します。デフォルトは 60 秒です。これは、healthy であることを担保しながら着信を待機するまでに時間がかかるコンテナのデプロイ時の問題を修正したり、迅速な起動が保証されているコンテナのデプロイを高速化したりするのに役立ちます。
+
 !!! info
     この説明を書いている時点では、[ドキュメント](https://docs.aws.amazon.com/ja_jp/elasticloadbalancing/latest/network/target-group-health-checks.html)によると、Network Load Balancer の 'unhealthy threshold' は 'healthy threshold' と同じである必要があるとされています。
 
@@ -80,3 +84,7 @@ nlb:
 nlb:
   alias: ["example.com", "v1.example.com"]
 ```
+<span class="parent-field">nlb.</span><a id="nlb-additional-listeners" href="#nlb-additional-listeners" class="field">`additional_listeners`</a> <span class="type">Array of Maps</span>  
+複数の NLB リスナーを設定します。
+
+{% include 'nlb-additionallisteners.ja.md' %}

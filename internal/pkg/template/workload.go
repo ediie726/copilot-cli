@@ -5,6 +5,7 @@ package template
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"strconv"
 	"text/template"
@@ -33,6 +34,7 @@ const (
 	rdWebSvcTplName     = "rd-web"
 	backendSvcTplName   = "backend"
 	workerSvcTplName    = "worker"
+	staticSiteTplName   = "static-site"
 	scheduledJobTplName = "scheduled-job"
 )
 
@@ -45,9 +47,13 @@ const (
 	PrivateSubnetsPlacement = "PrivateSubnets"
 
 	// RuntimePlatform configuration.
-	OSLinux             = "LINUX"
-	OSWindowsServerFull = "WINDOWS_SERVER_2019_FULL"
-	OSWindowsServerCore = "WINDOWS_SERVER_2019_CORE"
+	OSLinux                 = "LINUX"
+	OSWindowsServerFull     = OSWindowsServer2019Full // Alias 2019 as Default WindowsSever Full platform.
+	OSWindowsServerCore     = OSWindowsServer2019Core // Alias 2019 as Default WindowsSever Core platform.
+	OSWindowsServer2019Full = "WINDOWS_SERVER_2019_FULL"
+	OSWindowsServer2019Core = "WINDOWS_SERVER_2019_CORE"
+	OSWindowsServer2022Full = "WINDOWS_SERVER_2022_FULL"
+	OSWindowsServer2022Core = "WINDOWS_SERVER_2022_CORE"
 
 	ArchX86   = "X86_64"
 	ArchARM64 = "ARM64"
@@ -56,6 +62,16 @@ const (
 // Constants for ARN options.
 const (
 	snsARNPattern = "arn:%s:sns:%s:%s:%s-%s-%s-%s"
+)
+
+// Constants for stack resource logical IDs
+const (
+	LogicalIDHTTPListenerRuleWithDomain = "HTTPListenerRuleWithDomain"
+)
+
+const (
+	// NoExposedContainerPort indicates no port should be exposed for the service container.
+	NoExposedContainerPort = "-1"
 )
 
 var (
@@ -83,6 +99,7 @@ var (
 		"http-listener",
 		"env-controller",
 		"mount-points",
+		"variables",
 		"volumes",
 		"image-overrides",
 		"instancerole",
@@ -92,11 +109,12 @@ var (
 		"nlb",
 		"vpc-connector",
 		"alb",
+		"rollback-alarms",
 	}
 
 	// Operating systems to determine Fargate platform versions.
 	osFamiliesForPV100 = []string{
-		OSWindowsServerFull, OSWindowsServerCore,
+		OSWindowsServer2019Full, OSWindowsServer2019Core, OSWindowsServer2022Full, OSWindowsServer2022Core,
 	}
 )
 
@@ -112,13 +130,11 @@ type WorkloadNestedStackOpts struct {
 
 // SidecarOpts holds configuration that's needed if the service has sidecar containers.
 type SidecarOpts struct {
-	Name         *string
+	Name         string
 	Image        *string
 	Essential    *bool
-	Port         *string
-	Protocol     *string
 	CredsParam   *string
-	Variables    map[string]string
+	Variables    map[string]Variable
 	Secrets      map[string]Secret
 	Storage      SidecarStorageOpts
 	DockerLabels map[string]string
@@ -126,6 +142,14 @@ type SidecarOpts struct {
 	EntryPoint   []string
 	Command      []string
 	HealthCheck  *ContainerHealthCheck
+	PortMappings []*PortMapping
+}
+
+// PortMapping holds container port mapping configuration.
+type PortMapping struct {
+	Protocol      string
+	ContainerPort uint16
+	ContainerName string
 }
 
 // SidecarStorageOpts holds data structures for rendering Mount Points inside of a sidecar.
@@ -136,6 +160,7 @@ type SidecarStorageOpts struct {
 // StorageOpts holds data structures for rendering Volumes and Mount Points
 type StorageOpts struct {
 	Ephemeral         *int
+	ReadonlyRootFS    *bool
 	Volumes           []*Volume
 	MountPoints       []*MountPoint
 	EFSPerms          []*EFSPermission
@@ -195,13 +220,33 @@ type LogConfigOpts struct {
 	EnableMetadata *string
 	SecretOptions  map[string]Secret
 	ConfigFile     *string
-	Variables      map[string]string
+	Variables      map[string]Variable
 	Secrets        map[string]Secret
+}
+
+// HTTPTargetContainer represents the target group of a load balancer that points to a container.
+type HTTPTargetContainer struct {
+	Name string
+	Port string
+}
+
+// Exposed returns true if the target container has an accessible port to receive traffic.
+func (tg HTTPTargetContainer) Exposed() bool {
+	return tg.Port != "" && tg.Port != NoExposedContainerPort
+}
+
+// StrconvUint16 returns string converted from uint16.
+func StrconvUint16(val uint16) string {
+	return strconv.FormatUint(uint64(val), 10)
 }
 
 // HTTPHealthCheckOpts holds configuration that's needed for HTTP Health Check.
 type HTTPHealthCheckOpts struct {
-	HealthCheckPath     string
+	// Fields with defaults always set.
+	HealthCheckPath string
+	GracePeriod     int64
+
+	// Optional.
 	Port                string
 	SuccessCodes        string
 	HealthyThreshold    *int64
@@ -209,33 +254,113 @@ type HTTPHealthCheckOpts struct {
 	Interval            *int64
 	Timeout             *int64
 	DeregistrationDelay *int64
-	GracePeriod         *int64
 }
 
-// A Secret represents an SSM or SecretsManager secret that can be rendered in CloudFormation.
-type Secret interface {
+type importable interface {
+	RequiresImport() bool
+}
+
+type importableValue interface {
+	importable
+	Value() string
+}
+
+// Variable represents the value of an environment variable.
+type Variable importableValue
+
+// ImportedVariable returns a Variable that should be imported from a stack.
+func ImportedVariable(name string) Variable {
+	return importedEnvVar(name)
+}
+
+// PlainVariable returns a Variable that is a plain string value.
+func PlainVariable(value string) Variable {
+	return plainEnvVar(value)
+}
+
+type plainEnvVar string
+
+// RequiresImport returns false for a plain string environment variable.
+func (v plainEnvVar) RequiresImport() bool {
+	return false
+}
+
+// Value returns the plain string value of the environment variable.
+func (v plainEnvVar) Value() string {
+	return string(v)
+}
+
+type importedEnvVar string
+
+// RequiresImport returns true for an imported environment variable.
+func (v importedEnvVar) RequiresImport() bool {
+	return true
+}
+
+// Value returns the name of the import that will be the value of the environment variable.
+func (v importedEnvVar) Value() string {
+	return string(v)
+}
+
+type importableSubValueFrom interface {
+	importable
 	RequiresSub() bool
 	ValueFrom() string
 }
 
-// ssmOrSecretARN is a Secret stored that can be referred by an SSM Parameter Name or a secret ARN.
-type ssmOrSecretARN struct {
+// A Secret represents an SSM or SecretsManager secret that can be rendered in CloudFormation.
+type Secret importableSubValueFrom
+
+// plainSSMOrSecretARN is a Secret stored that can be referred by an SSM Parameter Name or a secret ARN.
+type plainSSMOrSecretARN struct {
 	value string
 }
 
 // RequiresSub returns true if the secret should be populated in CloudFormation with !Sub.
-func (s ssmOrSecretARN) RequiresSub() bool {
+func (s plainSSMOrSecretARN) RequiresSub() bool {
 	return false
 }
 
-// ValueFrom returns the valueFrom field for the secret.
-func (s ssmOrSecretARN) ValueFrom() string {
+// RequiresImport returns true if the secret should be imported from other CloudFormation stack.
+func (s plainSSMOrSecretARN) RequiresImport() bool {
+	return false
+}
+
+// ValueFrom returns the plain string value of the secret.
+func (s plainSSMOrSecretARN) ValueFrom() string {
 	return s.value
 }
 
-// SecretFromSSMOrARN returns a Secret that refers to an SSM parameter or a secret ARN.
-func SecretFromSSMOrARN(value string) ssmOrSecretARN {
-	return ssmOrSecretARN{
+// SecretFromPlainSSMOrARN returns a Secret that refers to an SSM parameter or a secret ARN.
+func SecretFromPlainSSMOrARN(value string) plainSSMOrSecretARN {
+	return plainSSMOrSecretARN{
+		value: value,
+	}
+}
+
+// importedSSMorSecretARN is a Secret that can be referred by the name of the import value from env addon or an arbitary CloudFormation stack.
+type importedSSMorSecretARN struct {
+	value string
+}
+
+// RequiresSub returns true if the secret should be populated in CloudFormation with !Sub.
+func (s importedSSMorSecretARN) RequiresSub() bool {
+	return false
+}
+
+// RequiresImport returns true if the secret should be imported from env addon or an arbitary CloudFormation stack.
+func (s importedSSMorSecretARN) RequiresImport() bool {
+	return true
+}
+
+// ValueFrom returns the name of the import value of the Secret.
+func (s importedSSMorSecretARN) ValueFrom() string {
+	return s.value
+}
+
+// SecretFromImportedSSMOrARN returns a Secret that refers to imported name of SSM parameter or a secret ARN.
+func SecretFromImportedSSMOrARN(value string) importedSSMorSecretARN {
+	return importedSSMorSecretARN{
 		value: value,
 	}
 }
@@ -248,6 +373,11 @@ type secretsManagerName struct {
 // RequiresSub returns true if the secret should be populated in CloudFormation with !Sub.
 func (s secretsManagerName) RequiresSub() bool {
 	return true
+}
+
+// RequiresImport returns true if the secret should be imported from other CloudFormation stack.
+func (s secretsManagerName) RequiresImport() bool {
+	return false
 }
 
 // ValueFrom returns the resource ID of the SecretsManager secret for populating the ARN.
@@ -279,9 +409,9 @@ type NetworkLoadBalancerListener struct {
 
 	SSLPolicy *string // The SSL policy applied when using TLS protocol.
 
-	Aliases     []string
-	Stickiness  *bool
-	HealthCheck NLBHealthCheck
+	Stickiness          *bool
+	HealthCheck         NLBHealthCheck
+	DeregistrationDelay *int64
 }
 
 // NLBHealthCheck holds configuration for Network Load Balancer health check.
@@ -291,13 +421,71 @@ type NLBHealthCheck struct {
 	UnhealthyThreshold *int64
 	Timeout            *int64
 	Interval           *int64
+	GracePeriod        *int64
 }
 
 // NetworkLoadBalancer holds configuration that's needed for a Network Load Balancer.
 type NetworkLoadBalancer struct {
-	PublicSubnetCIDRs []string
-	Listener          NetworkLoadBalancerListener
+	PublicSubnetCIDRs   []string
+	Listener            []NetworkLoadBalancerListener
+	MainContainerPort   string
+	CertificateRequired bool
+	Aliases             []string
+}
+
+// ALBListenerRule holds configuration that's needed for an Application Load Balancer listener rule.
+type ALBListenerRule struct {
+	// The path that the Application Load Balancer listens to.
+	Path string
+	// The target container and port to which the traffic is routed to from the Application Load Balancer.
+	TargetContainer string
+	TargetPort      string
+
+	Aliases             []string
+	AllowedSourceIps    []string
+	Stickiness          string
+	HTTPHealthCheck     HTTPHealthCheckOpts
+	HTTPVersion         string
+	RedirectToHTTPS     bool // Only relevant if HTTPSListener is true.
+	DeregistrationDelay *int64
+}
+
+// ALBListener holds configuration that's needed for an Application Load Balancer Listener.
+type ALBListener struct {
+	Rules             []ALBListenerRule
+	HostedZoneAliases AliasesForHostedZone
+	IsHTTPS           bool // True if the listener listening on port 443.
 	MainContainerPort string
+}
+
+// Aliases return all the unique aliases specified across all the routing rules in ALB.
+func (cfg *ALBListener) Aliases() []string {
+	var uniqueAliases []string
+	seen := make(map[string]struct{})
+	exists := struct{}{}
+	for _, rule := range cfg.Rules {
+		for _, entry := range rule.Aliases {
+			if _, value := seen[entry]; !value {
+				uniqueAliases = append(uniqueAliases, entry)
+				seen[entry] = exists
+			}
+		}
+	}
+	return uniqueAliases
+}
+
+// RulePaths returns a slice consisting of all the routing paths mentioned across multiple listener rules.
+func (cfg *ALBListener) RulePaths() []string {
+	var rulePaths []string
+	for _, rule := range cfg.Rules {
+		rulePaths = append(rulePaths, rule.Path)
+	}
+	return rulePaths
+}
+
+// ServiceConnect holds configuration for ECS Service Connect.
+type ServiceConnect struct {
+	Alias *string
 }
 
 // AdvancedCount holds configuration for autoscaling and capacity provider
@@ -360,12 +548,42 @@ type ObservabilityOpts struct {
 	Tracing string // The name of the vendor used for tracing.
 }
 
-// DeploymentConfiguraitonOpts holds values for MinHealthyPercent and MaxPercent.
+// DeploymentConfigurationOpts holds configuration for rolling deployments.
 type DeploymentConfigurationOpts struct {
 	// The lower limit on the number of tasks that should be running during a service deployment or when a container instance is draining.
 	MinHealthyPercent int
 	// The upper limit on the number of tasks that should be running during a service deployment or when a container instance is draining.
 	MaxPercent int
+	Rollback   RollingUpdateRollbackConfig
+}
+
+// RollingUpdateRollbackConfig holds config for rollback alarms.
+type RollingUpdateRollbackConfig struct {
+	AlarmNames []string // Names of existing alarms.
+
+	// Custom alarms to create.
+	CPUUtilization    *float64
+	MemoryUtilization *float64
+	MessagesDelayed   *int
+}
+
+// HasRollbackAlarms returns true if the client is using ABR.
+func (cfg RollingUpdateRollbackConfig) HasRollbackAlarms() bool {
+	return len(cfg.AlarmNames) > 0 || cfg.HasCustomAlarms()
+}
+
+// HasCustomAlarms returns true if the client is using Copilot-generated alarms for alarm-based rollbacks.
+func (cfg RollingUpdateRollbackConfig) HasCustomAlarms() bool {
+	return cfg.CPUUtilization != nil || cfg.MemoryUtilization != nil || cfg.MessagesDelayed != nil
+}
+
+// TruncateAlarmName ensures that alarm names don't exceed the 255 character limit.
+func (cfg RollingUpdateRollbackConfig) TruncateAlarmName(app, env, svc, alarmType string) string {
+	if len(app)+len(env)+len(svc)+len(alarmType) <= 255 {
+		return fmt.Sprintf("%s-%s-%s-%s", app, env, svc, alarmType)
+	}
+	maxSubstringLength := (255 - len(alarmType) - 3) / 3
+	return fmt.Sprintf("%s-%s-%s-%s", app[:maxSubstringLength], env[:maxSubstringLength], svc[:maxSubstringLength], alarmType)
 }
 
 // ExecuteCommandOpts holds configuration that's needed for ECS Execute Command.
@@ -384,7 +602,8 @@ type PublishOpts struct {
 
 // Topic holds information needed to render a SNSTopic in a container definition.
 type Topic struct {
-	Name *string
+	Name            *string
+	FIFOTopicConfig *FIFOTopicConfig
 
 	Region    string
 	Partition string
@@ -392,6 +611,11 @@ type Topic struct {
 	App       string
 	Env       string
 	Svc       string
+}
+
+// FIFOTopicConfig holds configuration needed if the topic is FIFO.
+type FIFOTopicConfig struct {
+	ContentBasedDeduplication *bool
 }
 
 // SubscribeOpts holds configuration needed if the service has subscriptions.
@@ -420,10 +644,18 @@ type TopicSubscription struct {
 
 // SQSQueue holds information needed to render a SQS Queue in a container definition.
 type SQSQueue struct {
-	Retention  *int64
-	Delay      *int64
-	Timeout    *int64
-	DeadLetter *DeadLetterQueue
+	Retention       *int64
+	Delay           *int64
+	Timeout         *int64
+	DeadLetter      *DeadLetterQueue
+	FIFOQueueConfig *FIFOQueueConfig
+}
+
+// FIFOQueueConfig holds information needed to render a FIFO SQS Queue in a container definition.
+type FIFOQueueConfig struct {
+	FIFOThroughputLimit       *string
+	ContentBasedDeduplication *bool
+	DeduplicationScope        *string
 }
 
 // DeadLetterQueue holds information needed to render a dead-letter SQS Queue in a container definition.
@@ -433,12 +665,49 @@ type DeadLetterQueue struct {
 
 // NetworkOpts holds AWS networking configuration for the workloads.
 type NetworkOpts struct {
-	SecurityGroups []string
+	SecurityGroups []SecurityGroup
 	AssignPublicIP string
 	// SubnetsType and SubnetIDs are mutually exclusive. They won't be set together.
 	SubnetsType              string
 	SubnetIDs                []string
 	DenyDefaultSecurityGroup bool
+}
+
+// SecurityGroup represents the ID of an additional security group associated with the tasks.
+type SecurityGroup importableValue
+
+// PlainSecurityGroup returns a SecurityGroup that is a plain string value.
+func PlainSecurityGroup(value string) SecurityGroup {
+	return plainSecurityGroup(value)
+}
+
+// ImportedSecurityGroup returns a SecurityGroup that should be imported from a stack.
+func ImportedSecurityGroup(name string) SecurityGroup {
+	return importedSecurityGroup(name)
+}
+
+type plainSecurityGroup string
+
+// RequiresImport returns false for a plain string SecurityGroup.
+func (sg plainSecurityGroup) RequiresImport() bool {
+	return false
+}
+
+// Value returns the plain string value of the SecurityGroup.
+func (sg plainSecurityGroup) Value() string {
+	return string(sg)
+}
+
+type importedSecurityGroup string
+
+// RequiresImport returns true for an imported SecurityGroup.
+func (sg importedSecurityGroup) RequiresImport() bool {
+	return true
+}
+
+// Value returns the name of the import that will be the value of the SecurityGroup.
+func (sg importedSecurityGroup) Value() string {
+	return string(sg)
 }
 
 // RuntimePlatformOpts holds configuration needed for Platform configuration.
@@ -484,12 +753,17 @@ type WorkloadOpts struct {
 	EnvName            string
 	WorkloadName       string
 	SerializedManifest string // Raw manifest file used to deploy the workload.
+	EnvVersion         string
+	Version            string
+
+	// Configuration for the main container.
+	PortMappings []*PortMapping
+	Variables    map[string]Variable
+	Secrets      map[string]Secret
+	EntryPoint   []string
+	Command      []string
 
 	// Additional options that are common between **all** workload templates.
-	Variables                map[string]string
-	Secrets                  map[string]Secret
-	Aliases                  []string
-	HTTPSListener            bool
 	Tags                     map[string]string        // Used by App Runner workloads to tag App Runner service resources
 	NestedStack              *WorkloadNestedStackOpts // Outputs from nested stacks such as the addons stack.
 	AddonsExtraParams        string                   // Additional user defined Parameters for the addons stack.
@@ -502,26 +776,23 @@ type WorkloadOpts struct {
 	Network                  NetworkOpts
 	ExecuteCommand           *ExecuteCommandOpts
 	Platform                 RuntimePlatformOpts
-	EntryPoint               []string
-	Command                  []string
-	DomainAlias              string
 	DockerLabels             map[string]string
 	DependsOn                map[string]string
 	Publish                  *PublishOpts
 	ServiceDiscoveryEndpoint string
-	HTTPVersion              *string
 	ALBEnabled               bool
-	HostedZoneAliases        AliasesForHostedZone
 	CredentialsParameter     string
+	PermissionsBoundary      string
 
 	// Additional options for service templates.
 	WorkloadType            string
 	HealthCheck             *ContainerHealthCheck
-	HTTPHealthCheck         HTTPHealthCheckOpts
-	DeregistrationDelay     *int64
-	AllowedSourceIps        []string
+	HTTPTargetContainer     HTTPTargetContainer
+	GracePeriod             *int64
 	NLB                     *NetworkLoadBalancer
+	ALBListener             *ALBListener
 	DeploymentConfiguration DeploymentConfigurationOpts
+	ServiceConnect          *ServiceConnect
 
 	// Custom Resources backed by Lambda functions.
 	CustomResources map[string]S3ObjectLocation
@@ -531,9 +802,12 @@ type WorkloadOpts struct {
 	StateMachine       *StateMachineOpts
 
 	// Additional options for request driven web service templates.
-	StartCommand      *string
-	EnableHealthCheck bool
-	Observability     ObservabilityOpts
+	StartCommand         *string
+	EnableHealthCheck    bool
+	Observability        ObservabilityOpts
+	Private              bool
+	AppRunnerVPCEndpoint *string
+	Count                *string
 
 	// Input needed for the custom resource that adds a custom domain to the service.
 	Alias                *string
@@ -543,6 +817,29 @@ type WorkloadOpts struct {
 
 	// Additional options for worker service templates.
 	Subscribe *SubscribeOpts
+
+	// Additional options for static site template.
+	AssetMappingFileBucket string
+	AssetMappingFilePath   string
+	StaticSiteAlias        string
+}
+
+// HealthCheckProtocol returns the protocol for the Load Balancer health check,
+// or an empty string if it shouldn't be configured, defaulting to the
+// target protocol. (which is what happens, even if it isn't documented as such :))
+// https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-elasticloadbalancingv2-targetgroup.html#cfn-elasticloadbalancingv2-targetgroup-healthcheckprotocol
+func (lr ALBListenerRule) HealthCheckProtocol() string {
+	switch {
+	case lr.HTTPHealthCheck.Port == "443":
+		return "HTTPS"
+	case lr.TargetPort == "443" && lr.HTTPHealthCheck.Port == "":
+		return "HTTPS"
+	case lr.TargetPort == "443" && lr.HTTPHealthCheck.Port != "443":
+		// for backwards compatability, only set HTTP if target
+		// container is https but the specified health check port is not
+		return "HTTP"
+	}
+	return ""
 }
 
 // ParseLoadBalancedWebService parses a load balanced web service's CloudFormation template
@@ -565,6 +862,11 @@ func (t *Template) ParseBackendService(data WorkloadOpts) (*Content, error) {
 // ParseWorkerService parses a worker service's CloudFormation template with the specified data object and returns its content.
 func (t *Template) ParseWorkerService(data WorkloadOpts) (*Content, error) {
 	return t.parseSvc(workerSvcTplName, data, withSvcParsingFuncs())
+}
+
+// ParseStaticSite parses a static site service's CloudFormation template with the specified data object and returns its content.
+func (t *Template) ParseStaticSite(data WorkloadOpts) (*Content, error) {
+	return t.parseSvc(staticSiteTplName, data, withSvcParsingFuncs())
 }
 
 // ParseScheduledJob parses a scheduled job's Cloudformation Template
@@ -607,23 +909,35 @@ func (t *Template) parseWkld(name, wkldDirName string, data interface{}, options
 func withSvcParsingFuncs() ParseOption {
 	return func(t *template.Template) *template.Template {
 		return t.Funcs(map[string]interface{}{
-			"toSnakeCase":          ToSnakeCaseFunc,
-			"hasSecrets":           hasSecrets,
-			"fmtSlice":             FmtSliceFunc,
-			"quoteSlice":           QuoteSliceFunc,
-			"quote":                strconv.Quote,
-			"randomUUID":           randomUUIDFunc,
-			"jsonMountPoints":      generateMountPointJSON,
-			"jsonSNSTopics":        generateSNSJSON,
-			"jsonQueueURIs":        generateQueueURIJSON,
-			"envControllerParams":  envControllerParameters,
-			"logicalIDSafe":        StripNonAlphaNumFunc,
-			"wordSeries":           english.WordSeries,
-			"pluralWord":           english.PluralWord,
-			"contains":             contains,
-			"requiresVPCConnector": requiresVPCConnector,
+			"toSnakeCase":             ToSnakeCaseFunc,
+			"hasSecrets":              hasSecrets,
+			"fmtSlice":                FmtSliceFunc,
+			"quoteSlice":              QuoteSliceFunc,
+			"quote":                   strconv.Quote,
+			"randomUUID":              randomUUIDFunc,
+			"jsonMountPoints":         generateMountPointJSON,
+			"jsonSNSTopics":           generateSNSJSON,
+			"jsonQueueURIs":           generateQueueURIJSON,
+			"envControllerParams":     envControllerParameters,
+			"logicalIDSafe":           StripNonAlphaNumFunc,
+			"wordSeries":              english.WordSeries,
+			"pluralWord":              english.PluralWord,
+			"contains":                contains,
+			"requiresVPCConnector":    requiresVPCConnector,
+			"strconvUint16":           StrconvUint16,
+			"trancateWithHashPadding": trancateWithHashPadding,
 		})
 	}
+}
+
+func trancateWithHashPadding(s string, max, paddingLength int) string {
+	if len(s) <= max {
+		return s
+	}
+	h := sha256.New()
+	h.Write([]byte(s))
+	hash := fmt.Sprintf("%x", h.Sum(nil))
+	return s[:max] + hash[:paddingLength]
 }
 
 func hasSecrets(opts WorkloadOpts) bool {
@@ -656,6 +970,11 @@ func envControllerParameters(o WorkloadOpts) []string {
 	if o.WorkloadType == "Backend Service" {
 		if o.ALBEnabled {
 			parameters = append(parameters, "InternalALBWorkloads,")
+		}
+	}
+	if o.WorkloadType == "Request-Driven Web Service" {
+		if o.Private && o.AppRunnerVPCEndpoint == nil {
+			parameters = append(parameters, "AppRunnerPrivateWorkloads,")
 		}
 	}
 	if o.Network.SubnetsType == PrivateSubnetsPlacement {

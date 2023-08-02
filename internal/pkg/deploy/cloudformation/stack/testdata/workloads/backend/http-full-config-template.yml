@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a backend service on Amazon ECS.
+Metadata:
+  Version: v1.29.0
 Parameters:
   AppName:
     Type: String
@@ -23,6 +25,10 @@ Parameters:
     Description: "URL of the addons nested stack template within the S3 bucket."
     Type: String
     Default: ""
+  EnvFileARNForfluentbit:
+    Description: "URL of the environment file for the fluent-bit sidecar."
+    Type: String
+    Default: ""
   EnvFileARN:
     Description: "URL of the environment file."
     Type: String
@@ -39,14 +45,12 @@ Parameters:
     AllowedValues: [true, false]
   RulePath:
     Type: String
-  Stickiness:
-    Type: String
-    Default: false
 Conditions:
+  IsGovCloud: !Equals [!Ref "AWS::Partition", "aws-us-gov"]
   HasAddons: !Not [!Equals [!Ref AddonsTemplateURL, ""]]
   HasEnvFile: !Not [!Equals [!Ref EnvFileARN, ""]]
-  ExposePort: !Not [!Equals [!Ref ContainerPort, -1]]
-  IsDefaultRootPath: !Equals [!Ref RulePath, "/"]
+  HasEnvFileForfluentbit: !Not [!Equals [!Ref EnvFileARNForfluentbit, ""]]
+  ExposePort: !Not [!Equals [!Ref TargetPort, -1]]
 Resources:
   LogGroup:
     Metadata:
@@ -99,11 +103,37 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-stream-prefix: copilot
           PortMappings:
-            !If [
-              ExposePort,
-              [{ ContainerPort: !Ref ContainerPort }],
-              !Ref "AWS::NoValue",
-            ]
+            - ContainerPort: 8080
+              Protocol: tcp
+            - ContainerPort: 8081
+              Protocol: tcp
+              Name: target
+        - Name: fluent-bit
+          Image: 1234567890.dkr.ecr.us-west-2.amazonaws.com/reverse-proxy:revision_1
+          Environment:
+            - Name: COPILOT_APPLICATION_NAME
+              Value: !Sub "${AppName}"
+            - Name: COPILOT_SERVICE_DISCOVERY_ENDPOINT
+              Value: my-env.my-app.local
+            - Name: COPILOT_ENVIRONMENT_NAME
+              Value: !Sub "${EnvName}"
+            - Name: COPILOT_SERVICE_NAME
+              Value: !Sub "${WorkloadName}"
+          EnvironmentFiles:
+            - !If
+              - HasEnvFileForfluentbit
+              - Type: s3
+                Value: !Ref EnvFileARNForfluentbit
+              - !Ref AWS::NoValue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: copilot
+          PortMappings:
+            - ContainerPort: 1234
+              Protocol: tcp
   ExecutionRole:
     Metadata:
       "aws:copilot:description": "An IAM Role for the Fargate agent to make AWS API calls on your behalf"
@@ -197,6 +227,28 @@ Resources:
                             ],
                           ]
           - !Ref AWS::NoValue
+        - !If
+          - HasEnvFileForfluentbit
+          - PolicyName: !Join ['', [!Ref AppName, '-', !Ref EnvName, '-', !Ref WorkloadName, GetEnvFilePolicyForfluentbit]]
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: 'Allow'
+                  Action:
+                    - 's3:GetObject'
+                  Resource:
+                    - !Ref EnvFileARNForfluentbit
+                - Effect: 'Allow'
+                  Action:
+                    - 's3:GetBucketLocation'
+                  Resource:
+                    - !Join
+                      - ''
+                      - - 'arn:'
+                        - !Ref AWS::Partition
+                        - ':s3:::'
+                        - !Select [0, !Split ['/', !Select [5, !Split [':', !Ref EnvFileARNForfluentbit ]]]]
+          - !Ref AWS::NoValue
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
   TaskRole:
@@ -274,6 +326,7 @@ Resources:
     DependsOn:
       - EnvControllerAction
       - HTTPListenerRule
+      - HTTPListenerRule1
     Properties:
       PlatformVersion: LATEST
       Cluster:
@@ -286,9 +339,20 @@ Resources:
           Rollback: true
         MinimumHealthyPercent: 100
         MaximumPercent: 200
+        Alarms:
+          !If
+          - IsGovCloud
+          - !Ref AWS::NoValue
+          - Enable: false
+            AlarmNames: []
+            Rollback: true
       PropagateTags: SERVICE
       EnableExecuteCommand: true
       LaunchType: FARGATE
+      ServiceConnectConfiguration: !If
+        - IsGovCloud
+        - !Ref AWS::NoValue
+        - Enabled: False
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
@@ -304,19 +368,22 @@ Resources:
           [
             {
               RegistryArn: !GetAtt DiscoveryService.Arn,
-              Port: !Ref ContainerPort,
+              Port: !Ref TargetPort,
             },
           ],
           !Ref "AWS::NoValue",
         ]
       HealthCheckGracePeriodSeconds: 45
       LoadBalancers:
-        - ContainerName: !Ref TargetContainer
-          ContainerPort: !Ref TargetPort
+        - ContainerName: http-full-config
+          ContainerPort: 8081
           TargetGroupArn: !Ref TargetGroup
+        - ContainerName: http-full-config
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup1
   TargetGroup:
     Metadata:
-      "aws:copilot:description": "A target group to connect the load balancer to your service"
+      "aws:copilot:description": "A target group to connect the load balancer to your service on port 8081"
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckPath: /healthz # Default is '/'.
@@ -327,22 +394,35 @@ Resources:
       UnhealthyThresholdCount: 2
       HealthCheckIntervalSeconds: 15
       HealthCheckTimeoutSeconds: 10
-      Port: !Ref ContainerPort
+      Port: 8081
       Protocol: HTTP
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: 5 # ECS Default is 300; Copilot default is 60.
         - Key: stickiness.enabled
-          Value: !Ref Stickiness
+          Value: true
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub "${AppName}-${EnvName}-VpcId"
+  TargetGroup1:
+    Metadata:
+      "aws:copilot:description": "A target group to connect the load balancer to your service on port 8080"
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPath: / # Default is '/'.
+      Port: 8080
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # ECS Default is 300; Copilot default is 60.
+        - Key: stickiness.enabled
+          Value: false
       TargetType: ip
       VpcId:
         Fn::ImportValue: !Sub "${AppName}-${EnvName}-VpcId"
   RulePriorityFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Code:
-        S3Bucket:
-        S3Key:
       Handler: "index.nextAvailableRulePriorityHandler"
       Timeout: 600
       MemorySize: 512
@@ -396,11 +476,11 @@ Resources:
     Type: Custom::RulePriorityFunction
     Properties:
       ServiceToken: !GetAtt RulePriorityFunction.Arn
-      RulePath: !Ref RulePath
+      RulePath: ["/http-full-config-path", "/admin"]
       ListenerArn: !GetAtt EnvControllerAction.InternalHTTPListenerArn
   HTTPListenerRule:
     Metadata:
-      "aws:copilot:description": "A HTTP listener rule for forwarding HTTP traffic"
+      "aws:copilot:description": "An HTTP listener rule for path `/http-full-config-path` that forwards HTTP traffic to your tasks"
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       Actions:
@@ -421,13 +501,35 @@ Resources:
                   - !GetAtt EnvControllerAction.InternalWorkloadsHostedZoneName
         - Field: "path-pattern"
           PathPatternConfig:
-            Values: !If
-              - IsDefaultRootPath
-              - - "/*"
-              - - !Sub "/${RulePath}"
-                - !Sub "/${RulePath}/*"
+            Values:
+              - "/http-full-config-path"
+              - "/http-full-config-path/*"
       ListenerArn: !GetAtt EnvControllerAction.InternalHTTPListenerArn
       Priority: !GetAtt HTTPRulePriorityAction.Priority
+  HTTPListenerRule1:
+    Metadata:
+      "aws:copilot:description": "An HTTP listener rule for path `/admin` that forwards HTTP traffic to your tasks"
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup1
+          Type: forward
+      Conditions:
+        - Field: "host-header"
+          HostHeaderConfig:
+            Values:
+              - !GetAtt EnvControllerAction.InternalLoadBalancerDNSName
+              - !Join
+                - "."
+                - - !Ref WorkloadName
+                  - !GetAtt EnvControllerAction.InternalWorkloadsHostedZoneName
+        - Field: "path-pattern"
+          PathPatternConfig:
+            Values:
+              - "/admin"
+              - "/admin/*"
+      ListenerArn: !GetAtt EnvControllerAction.InternalHTTPListenerArn
+      Priority: !GetAtt HTTPRulePriorityAction.Priority1
   AddonsStack:
     Metadata:
       "aws:copilot:description": "An Addons CloudFormation Stack for your additional AWS resources"
@@ -449,12 +551,10 @@ Resources:
       Workload: !Ref WorkloadName
       EnvStack: !Sub "${AppName}-${EnvName}"
       Parameters: ["InternalALBWorkloads"]
+      EnvVersion: v1.42.0
   EnvControllerFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Code:
-        S3Bucket:
-        S3Key:
       Handler: "index.handler"
       Timeout: 900
       MemorySize: 512

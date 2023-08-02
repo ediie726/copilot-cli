@@ -16,31 +16,31 @@ import (
 	gomock "github.com/golang/mock/gomock"
 )
 
-// Mockprompter is a mock of prompter interface.
-type Mockprompter struct {
+// MockPrompter is a mock of Prompter interface.
+type MockPrompter struct {
 	ctrl     *gomock.Controller
-	recorder *MockprompterMockRecorder
+	recorder *MockPrompterMockRecorder
 }
 
-// MockprompterMockRecorder is the mock recorder for Mockprompter.
-type MockprompterMockRecorder struct {
-	mock *Mockprompter
+// MockPrompterMockRecorder is the mock recorder for MockPrompter.
+type MockPrompterMockRecorder struct {
+	mock *MockPrompter
 }
 
-// NewMockprompter creates a new mock instance.
-func NewMockprompter(ctrl *gomock.Controller) *Mockprompter {
-	mock := &Mockprompter{ctrl: ctrl}
-	mock.recorder = &MockprompterMockRecorder{mock}
+// NewMockPrompter creates a new mock instance.
+func NewMockPrompter(ctrl *gomock.Controller) *MockPrompter {
+	mock := &MockPrompter{ctrl: ctrl}
+	mock.recorder = &MockPrompterMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *Mockprompter) EXPECT() *MockprompterMockRecorder {
+func (m *MockPrompter) EXPECT() *MockPrompterMockRecorder {
 	return m.recorder
 }
 
 // Confirm mocks base method.
-func (m *Mockprompter) Confirm(message, help string, promptOpts ...prompt.PromptConfig) (bool, error) {
+func (m *MockPrompter) Confirm(message, help string, promptOpts ...prompt.PromptConfig) (bool, error) {
 	m.ctrl.T.Helper()
 	varargs := []interface{}{message, help}
 	for _, a := range promptOpts {
@@ -53,14 +53,14 @@ func (m *Mockprompter) Confirm(message, help string, promptOpts ...prompt.Prompt
 }
 
 // Confirm indicates an expected call of Confirm.
-func (mr *MockprompterMockRecorder) Confirm(message, help interface{}, promptOpts ...interface{}) *gomock.Call {
+func (mr *MockPrompterMockRecorder) Confirm(message, help interface{}, promptOpts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{message, help}, promptOpts...)
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Confirm", reflect.TypeOf((*Mockprompter)(nil).Confirm), varargs...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Confirm", reflect.TypeOf((*MockPrompter)(nil).Confirm), varargs...)
 }
 
 // Get mocks base method.
-func (m *Mockprompter) Get(message, help string, validator prompt.ValidatorFunc, promptOpts ...prompt.PromptConfig) (string, error) {
+func (m *MockPrompter) Get(message, help string, validator prompt.ValidatorFunc, promptOpts ...prompt.PromptConfig) (string, error) {
 	m.ctrl.T.Helper()
 	varargs := []interface{}{message, help, validator}
 	for _, a := range promptOpts {
@@ -73,14 +73,14 @@ func (m *Mockprompter) Get(message, help string, validator prompt.ValidatorFunc,
 }
 
 // Get indicates an expected call of Get.
-func (mr *MockprompterMockRecorder) Get(message, help, validator interface{}, promptOpts ...interface{}) *gomock.Call {
+func (mr *MockPrompterMockRecorder) Get(message, help, validator interface{}, promptOpts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{message, help, validator}, promptOpts...)
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*Mockprompter)(nil).Get), varargs...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockPrompter)(nil).Get), varargs...)
 }
 
 // MultiSelect mocks base method.
-func (m *Mockprompter) MultiSelect(message, help string, options []string, validator prompt.ValidatorFunc, promptOpts ...prompt.PromptConfig) ([]string, error) {
+func (m *MockPrompter) MultiSelect(message, help string, options []string, validator prompt.ValidatorFunc, promptOpts ...prompt.PromptConfig) ([]string, error) {
 	m.ctrl.T.Helper()
 	varargs := []interface{}{message, help, options, validator}
 	for _, a := range promptOpts {
@@ -93,14 +93,34 @@ func (m *Mockprompter) MultiSelect(message, help string, options []string, valid
 }
 
 // MultiSelect indicates an expected call of MultiSelect.
-func (mr *MockprompterMockRecorder) MultiSelect(message, help, options, validator interface{}, promptOpts ...interface{}) *gomock.Call {
+func (mr *MockPrompterMockRecorder) MultiSelect(message, help, options, validator interface{}, promptOpts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{message, help, options, validator}, promptOpts...)
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MultiSelect", reflect.TypeOf((*Mockprompter)(nil).MultiSelect), varargs...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MultiSelect", reflect.TypeOf((*MockPrompter)(nil).MultiSelect), varargs...)
+}
+
+// MultiSelectOptions mocks base method.
+func (m *MockPrompter) MultiSelectOptions(message, help string, opts []prompt.Option, promptCfgs ...prompt.PromptConfig) ([]string, error) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{message, help, opts}
+	for _, a := range promptCfgs {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "MultiSelectOptions", varargs...)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// MultiSelectOptions indicates an expected call of MultiSelectOptions.
+func (mr *MockPrompterMockRecorder) MultiSelectOptions(message, help, opts interface{}, promptCfgs ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{message, help, opts}, promptCfgs...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MultiSelectOptions", reflect.TypeOf((*MockPrompter)(nil).MultiSelectOptions), varargs...)
 }
 
 // SelectOne mocks base method.
-func (m *Mockprompter) SelectOne(message, help string, options []string, promptOpts ...prompt.PromptConfig) (string, error) {
+func (m *MockPrompter) SelectOne(message, help string, options []string, promptOpts ...prompt.PromptConfig) (string, error) {
 	m.ctrl.T.Helper()
 	varargs := []interface{}{message, help, options}
 	for _, a := range promptOpts {
@@ -113,14 +133,14 @@ func (m *Mockprompter) SelectOne(message, help string, options []string, promptO
 }
 
 // SelectOne indicates an expected call of SelectOne.
-func (mr *MockprompterMockRecorder) SelectOne(message, help, options interface{}, promptOpts ...interface{}) *gomock.Call {
+func (mr *MockPrompterMockRecorder) SelectOne(message, help, options interface{}, promptOpts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{message, help, options}, promptOpts...)
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SelectOne", reflect.TypeOf((*Mockprompter)(nil).SelectOne), varargs...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SelectOne", reflect.TypeOf((*MockPrompter)(nil).SelectOne), varargs...)
 }
 
 // SelectOption mocks base method.
-func (m *Mockprompter) SelectOption(message, help string, opts []prompt.Option, promptCfgs ...prompt.PromptConfig) (string, error) {
+func (m *MockPrompter) SelectOption(message, help string, opts []prompt.Option, promptCfgs ...prompt.PromptConfig) (string, error) {
 	m.ctrl.T.Helper()
 	varargs := []interface{}{message, help, opts}
 	for _, a := range promptCfgs {
@@ -133,10 +153,10 @@ func (m *Mockprompter) SelectOption(message, help string, opts []prompt.Option, 
 }
 
 // SelectOption indicates an expected call of SelectOption.
-func (mr *MockprompterMockRecorder) SelectOption(message, help, opts interface{}, promptCfgs ...interface{}) *gomock.Call {
+func (mr *MockPrompterMockRecorder) SelectOption(message, help, opts interface{}, promptCfgs ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{message, help, opts}, promptCfgs...)
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SelectOption", reflect.TypeOf((*Mockprompter)(nil).SelectOption), varargs...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SelectOption", reflect.TypeOf((*MockPrompter)(nil).SelectOption), varargs...)
 }
 
 // MockappEnvLister is a mock of appEnvLister interface.
@@ -563,21 +583,6 @@ func (m *MockworkspaceRetriever) EXPECT() *MockworkspaceRetrieverMockRecorder {
 	return m.recorder
 }
 
-// ListDockerfiles mocks base method.
-func (m *MockworkspaceRetriever) ListDockerfiles() ([]string, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListDockerfiles")
-	ret0, _ := ret[0].([]string)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ListDockerfiles indicates an expected call of ListDockerfiles.
-func (mr *MockworkspaceRetrieverMockRecorder) ListDockerfiles() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListDockerfiles", reflect.TypeOf((*MockworkspaceRetriever)(nil).ListDockerfiles))
-}
-
 // ListEnvironments mocks base method.
 func (m *MockworkspaceRetriever) ListEnvironments() ([]string, error) {
 	m.ctrl.T.Helper()
@@ -706,6 +711,21 @@ func (mr *MockdeployedWorkloadsRetrieverMockRecorder) IsServiceDeployed(appName,
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsServiceDeployed", reflect.TypeOf((*MockdeployedWorkloadsRetriever)(nil).IsServiceDeployed), appName, envName, svcName)
 }
 
+// IsWorkloadDeployed mocks base method.
+func (m *MockdeployedWorkloadsRetriever) IsWorkloadDeployed(appName, envName, wkldName string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IsWorkloadDeployed", appName, envName, wkldName)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// IsWorkloadDeployed indicates an expected call of IsWorkloadDeployed.
+func (mr *MockdeployedWorkloadsRetrieverMockRecorder) IsWorkloadDeployed(appName, envName, wkldName interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsWorkloadDeployed", reflect.TypeOf((*MockdeployedWorkloadsRetriever)(nil).IsWorkloadDeployed), appName, envName, wkldName)
+}
+
 // ListDeployedJobs mocks base method.
 func (m *MockdeployedWorkloadsRetriever) ListDeployedJobs(appName, envName string) ([]string, error) {
 	m.ctrl.T.Helper()
@@ -734,6 +754,21 @@ func (m *MockdeployedWorkloadsRetriever) ListDeployedServices(appName, envName s
 func (mr *MockdeployedWorkloadsRetrieverMockRecorder) ListDeployedServices(appName, envName interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListDeployedServices", reflect.TypeOf((*MockdeployedWorkloadsRetriever)(nil).ListDeployedServices), appName, envName)
+}
+
+// ListDeployedWorkloads mocks base method.
+func (m *MockdeployedWorkloadsRetriever) ListDeployedWorkloads(appName, envName string) ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListDeployedWorkloads", appName, envName)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListDeployedWorkloads indicates an expected call of ListDeployedWorkloads.
+func (mr *MockdeployedWorkloadsRetrieverMockRecorder) ListDeployedWorkloads(appName, envName interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListDeployedWorkloads", reflect.TypeOf((*MockdeployedWorkloadsRetriever)(nil).ListDeployedWorkloads), appName, envName)
 }
 
 // ListSNSTopics mocks base method.

@@ -1,7 +1,6 @@
 # Application
 
-Application は、Service、Environment、Pipeline といった概念を取りまとめる概念です。あなたのアプリケーションがサービス１つですべてのことをやる
-ものであるか、マイクロサービスの集まりであるかに関係なく、Copilot はそれらとそのデプロイ先の Environment を１つの Application として取りまとめます。
+Application は、Service、Environment、Pipeline といった概念を取りまとめる概念です。あなたのアプリケーションがサービス１つですべてのことをやるものであるか、マイクロサービスの集まりであるかに関係なく、Copilot は Service やそれらがデプロイされる Environment を１つの Application として取りまとめます。
 
 例を見ていきましょう。ここでは投票を受け付け、結果を集計する投票アプリを構築しようとしているとします。
 
@@ -12,6 +11,9 @@ Application は、Service、Environment、Pipeline といった概念を取り�
 ![](https://user-images.githubusercontent.com/879348/85869625-cd858d00-b780-11ea-817c-638814049d2d.png)
 
 ## Application の作成
+
+!!! Attention
+    既存に他の目的で作成した `copilot/` ディレクトリがある場合、Copilot がそのディレクトリにファイルを作成することがあります。このような場合は、作業ディレクトリ付近に `copilot/` という名前の空のディレクトリを作成することができます。Copilot はこの空のディレクトリを代わりに使用します。
 
 Application のセットアップは、`copilot init` コマンドで行えます。コマンドを実行すると、新しい Application をセットアップするか、あるいは既存の Application を利用するかを質問されます。
 
@@ -30,11 +32,13 @@ Application の名前はその AWS アカウント内の全てのリージョン
 
 * Application、Service、Environment にて作成される AWS リソースに対する [AWS リソースタグ](https://docs.aws.amazon.com/ja_jp/general/latest/gr/aws_tagging.html) を利用した追加のタグ付け
 * "Load Balanced Web Service" アーキテクチャ利用時のカスタムドメイン名設定
+* Application 内に作られる全てのロールに対して、パーミッションバウンダリーとして設定する既存の IAM ポリシーの指定
 
 ```bash
-$ copilot app init                             \
-  --domain my-awesome-app.aws                  \
-  --resource-tags department=MyDept,team=MyTeam
+$ copilot app init                                \
+  --domain my-awesome-app.aws                     \
+  --resource-tags department=MyDept,team=MyTeam   \
+  --permissions-boundary my-pb-policy
 ```
 
 ## インフラストラクチャ
@@ -77,21 +81,29 @@ ecs-kudos
 
 `copilot app show` コマンドを実行すると、Application 内の Service や Environment を含んだサマリ情報を表示します。
 
-```bash
+```console
 $ copilot app show
 About
 
   Name              vote
+  Version           v1.1.0
   URI               vote-app.aws
 
 Environments
 
   Name              AccountID           Region
+  ----              ---------           ------
   test              000000000000        us-east-1
 
-Services
+Workloads
 
-  Name              Type
-  collector         Load Balanced Web Service
-  aggregator        Backend Service
+  Name              Type                        Environments
+  ----              ----                        ------------
+  collector         Load Balanced Web Service   prod
+  aggregator        Backend Service             test, prod
+
+Pipelines
+
+  Name
+  ----
 ```

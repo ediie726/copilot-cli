@@ -5,6 +5,7 @@ package manifest
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 
 // Defaults for Firelens configuration.
 const (
-	firelensContainerName = "firelens_log_router"
+	FirelensContainerName = "firelens_log_router"
 	defaultFluentbitImage = "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
 )
 
@@ -25,6 +26,8 @@ const (
 	OSWindows               = dockerengine.OSWindows
 	OSWindowsServer2019Core = "windows_server_2019_core"
 	OSWindowsServer2019Full = "windows_server_2019_full"
+	OSWindowsServer2022Core = "windows_server_2022_core"
+	OSWindowsServer2022Full = "windows_server_2022_full"
 
 	ArchAMD64 = dockerengine.ArchAMD64
 	ArchX86   = dockerengine.ArchX86
@@ -43,7 +46,7 @@ const (
 // Platform related settings.
 var (
 	defaultPlatform     = platformString(OSLinux, ArchAMD64)
-	windowsOSFamilies   = []string{OSWindows, OSWindowsServer2019Core, OSWindowsServer2019Full}
+	windowsOSFamilies   = []string{OSWindows, OSWindowsServer2019Core, OSWindowsServer2019Full, OSWindowsServer2022Core, OSWindowsServer2022Full}
 	validShortPlatforms = []string{ // All of the os/arch combinations that the PlatformString field may accept.
 		dockerengine.PlatformString(OSLinux, ArchAMD64),
 		dockerengine.PlatformString(OSLinux, ArchX86),
@@ -63,6 +66,10 @@ var (
 		{OSFamily: aws.String(OSWindowsServer2019Core), Arch: aws.String(ArchAMD64)},
 		{OSFamily: aws.String(OSWindowsServer2019Full), Arch: aws.String(ArchX86)},
 		{OSFamily: aws.String(OSWindowsServer2019Full), Arch: aws.String(ArchAMD64)},
+		{OSFamily: aws.String(OSWindowsServer2022Core), Arch: aws.String(ArchX86)},
+		{OSFamily: aws.String(OSWindowsServer2022Core), Arch: aws.String(ArchAMD64)},
+		{OSFamily: aws.String(OSWindowsServer2022Full), Arch: aws.String(ArchX86)},
+		{OSFamily: aws.String(OSWindowsServer2022Full), Arch: aws.String(ArchAMD64)},
 	}
 )
 
@@ -78,13 +85,53 @@ type ImageWithPortAndHealthcheck struct {
 	HealthCheck   ContainerHealthCheck `yaml:"healthcheck"`
 }
 
-// DeploymentConfiguration represents the deployment strategies for a service.
-type DeploymentConfiguration struct {
+// AlarmArgs represents specs of CloudWatch alarms for deployment rollbacks.
+type AlarmArgs struct {
+	CPUUtilization    *float64 `yaml:"cpu_utilization"`
+	MemoryUtilization *float64 `yaml:"memory_utilization"`
+}
+
+// WorkerAlarmArgs represents specs of CloudWatch alarms for Worker Service deployment rollbacks.
+type WorkerAlarmArgs struct {
+	AlarmArgs       `yaml:",inline"`
+	MessagesDelayed *int `yaml:"messages_delayed"`
+}
+
+// DeploymentControllerConfig represents deployment strategies for a service.
+type DeploymentControllerConfig struct {
 	Rolling *string `yaml:"rolling"`
 }
 
-func (d *DeploymentConfiguration) isEmpty() bool {
-	return d == nil || d.Rolling == nil
+// DeploymentConfig represents the deployment config for an ECS service.
+type DeploymentConfig struct {
+	DeploymentControllerConfig `yaml:",inline"`
+	RollbackAlarms             Union[[]string, AlarmArgs] `yaml:"rollback_alarms"`
+}
+
+// WorkerDeploymentConfig represents the deployment strategies for a worker service.
+type WorkerDeploymentConfig struct {
+	DeploymentControllerConfig `yaml:",inline"`
+	WorkerRollbackAlarms       Union[[]string, WorkerAlarmArgs] `yaml:"rollback_alarms"`
+}
+
+func (d *DeploymentConfig) isEmpty() bool {
+	return d == nil || (d.DeploymentControllerConfig.isEmpty() && d.RollbackAlarms.IsZero())
+}
+
+func (d *DeploymentControllerConfig) isEmpty() bool {
+	return d.Rolling == nil
+}
+
+func (w *WorkerDeploymentConfig) isEmpty() bool {
+	return w == nil || (w.DeploymentControllerConfig.Rolling == nil && w.WorkerRollbackAlarms.IsZero())
+}
+
+// ExposedPort will hold the port mapping configuration.
+type ExposedPort struct {
+	ContainerName        string // The name of the container that exposes this port.
+	Port                 uint16 // The port number.
+	Protocol             string // Either "tcp" or "udp", empty means the default value that the underlying service provides.
+	isDefinedByContainer bool   // Defines if the container port is exposed from "image.port" or "sidecar.port". defaults to false.
 }
 
 // ImageWithHealthcheckAndOptionalPort represents a container image with an optional exposed port and health check.
@@ -106,10 +153,36 @@ type TaskConfig struct {
 	Platform       PlatformArgsOrString `yaml:"platform,omitempty"`
 	Count          Count                `yaml:"count"`
 	ExecuteCommand ExecuteCommand       `yaml:"exec"`
-	Variables      map[string]string    `yaml:"variables"`
+	Variables      map[string]Variable  `yaml:"variables"`
 	EnvFile        *string              `yaml:"env_file"`
 	Secrets        map[string]Secret    `yaml:"secrets"`
 	Storage        Storage              `yaml:"storage"`
+}
+
+// Variable represents an identifier for the value of an environment variable.
+type Variable struct {
+	stringOrFromCFN
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler (v3) interface to override the default YAML unmarshalling logic.
+func (v *Variable) UnmarshalYAML(value *yaml.Node) error {
+	if err := v.stringOrFromCFN.UnmarshalYAML(value); err != nil {
+		return fmt.Errorf(`unmarshal "variables": %w`, err)
+	}
+	return nil
+}
+
+// RequiresImport returns true if the value is imported from an environment.
+func (v *Variable) RequiresImport() bool {
+	return !v.FromCFN.isEmpty()
+}
+
+// Value returns the value, whether it is used for import or not.
+func (v *Variable) Value() string {
+	if v.RequiresImport() {
+		return aws.StringValue(v.FromCFN.Name)
+	}
+	return aws.StringValue(v.Plain)
 }
 
 // ContainerPlatform returns the platform for the service.
@@ -135,7 +208,7 @@ func (t TaskConfig) IsARM() bool {
 
 // Secret represents an identifier for sensitive data stored in either SSM or SecretsManager.
 type Secret struct {
-	from               *string              // SSM Parameter name or ARN to a secret.
+	from               stringOrFromCFN      // SSM Parameter name or ARN to a secret or secret ARN imported from another CloudFormation stack.
 	fromSecretsManager secretsManagerSecret // Conveniently fetch from a secretsmanager secret name instead of ARN.
 }
 
@@ -163,12 +236,19 @@ func (s *Secret) IsSecretsManagerName() bool {
 	return !s.fromSecretsManager.IsEmpty()
 }
 
+// RequiresImport returns true if the SSM parameter name or secret ARN value is imported from CloudFormation stack.
+func (s *Secret) RequiresImport() bool {
+	return !s.from.FromCFN.isEmpty()
+}
+
 // Value returns the secret value provided by clients.
 func (s *Secret) Value() string {
 	if !s.fromSecretsManager.IsEmpty() {
 		return aws.StringValue(s.fromSecretsManager.Name)
+	} else if s.RequiresImport() {
+		return aws.StringValue(s.from.FromCFN.Name)
 	}
-	return aws.StringValue(s.from)
+	return aws.StringValue(s.from.Plain)
 }
 
 // secretsManagerSecret represents the name of a secret stored in SecretsManager.
@@ -183,20 +263,21 @@ func (s secretsManagerSecret) IsEmpty() bool {
 
 // Logging holds configuration for Firelens to route your logs.
 type Logging struct {
-	Retention      *int              `yaml:"retention"`
-	Image          *string           `yaml:"image"`
-	Destination    map[string]string `yaml:"destination,flow"`
-	EnableMetadata *bool             `yaml:"enableMetadata"`
-	SecretOptions  map[string]Secret `yaml:"secretOptions"`
-	ConfigFile     *string           `yaml:"configFilePath"`
-	Variables      map[string]string `yaml:"variables"`
-	Secrets        map[string]Secret `yaml:"secrets"`
+	Retention      *int                `yaml:"retention"`
+	Image          *string             `yaml:"image"`
+	Destination    map[string]string   `yaml:"destination,flow"`
+	EnableMetadata *bool               `yaml:"enableMetadata"`
+	SecretOptions  map[string]Secret   `yaml:"secretOptions"`
+	ConfigFile     *string             `yaml:"configFilePath"`
+	Variables      map[string]Variable `yaml:"variables"`
+	Secrets        map[string]Secret   `yaml:"secrets"`
+	EnvFile        *string             `yaml:"env_file"`
 }
 
 // IsEmpty returns empty if the struct has all zero members.
 func (lc *Logging) IsEmpty() bool {
-	return lc.Image == nil && lc.Destination == nil && lc.EnableMetadata == nil &&
-		lc.SecretOptions == nil && lc.ConfigFile == nil && lc.Variables == nil && lc.Secrets == nil
+	return lc.Image == nil && lc.Destination == nil && lc.EnableMetadata == nil && lc.SecretOptions == nil &&
+		lc.ConfigFile == nil && lc.Variables == nil && lc.Secrets == nil && lc.EnvFile == nil
 }
 
 // LogImage returns the default Fluent Bit image if not otherwise configured.
@@ -218,17 +299,30 @@ func (lc *Logging) GetEnableMetadata() *string {
 
 // SidecarConfig represents the configurable options for setting up a sidecar container.
 type SidecarConfig struct {
-	Port          *string              `yaml:"port"`
-	Image         *string              `yaml:"image"`
-	Essential     *bool                `yaml:"essential"`
-	CredsParam    *string              `yaml:"credentialsParameter"`
-	Variables     map[string]string    `yaml:"variables"`
-	Secrets       map[string]Secret    `yaml:"secrets"`
-	MountPoints   []SidecarMountPoint  `yaml:"mount_points"`
-	DockerLabels  map[string]string    `yaml:"labels"`
-	DependsOn     DependsOn            `yaml:"depends_on"`
-	HealthCheck   ContainerHealthCheck `yaml:"healthcheck"`
+	Port          *string                              `yaml:"port"`
+	Image         Union[*string, ImageLocationOrBuild] `yaml:"image"`
+	Essential     *bool                                `yaml:"essential"`
+	CredsParam    *string                              `yaml:"credentialsParameter"`
+	Variables     map[string]Variable                  `yaml:"variables"`
+	EnvFile       *string                              `yaml:"env_file"`
+	Secrets       map[string]Secret                    `yaml:"secrets"`
+	MountPoints   []SidecarMountPoint                  `yaml:"mount_points"`
+	DockerLabels  map[string]string                    `yaml:"labels"`
+	DependsOn     DependsOn                            `yaml:"depends_on"`
+	HealthCheck   ContainerHealthCheck                 `yaml:"healthcheck"`
 	ImageOverride `yaml:",inline"`
+}
+
+// ImageURI returns the location of the image if one is set.
+// If the image needs to be build, return "" and false.
+func (cfg *SidecarConfig) ImageURI() (string, bool) {
+	if cfg.Image.Basic != nil {
+		return aws.StringValue(cfg.Image.Basic), true
+	}
+	if cfg.Image.Advanced.Location != nil {
+		return aws.StringValue(cfg.Image.Advanced.Location), true
+	}
+	return "", false
 }
 
 // OverrideRule holds the manifest overriding rule for CloudFormation template.
@@ -321,4 +415,26 @@ func (hc *ContainerHealthCheck) ApplyIfNotSet(other *ContainerHealthCheck) {
 	if hc.StartPeriod == nil && other.StartPeriod != nil {
 		hc.StartPeriod = other.StartPeriod
 	}
+}
+
+func envFiles(name *string, tc TaskConfig, lc Logging, sc map[string]*SidecarConfig) map[string]string {
+	envFiles := make(map[string]string)
+	// Grab the workload container's env file, if present.
+	envFiles[aws.StringValue(name)] = aws.StringValue(tc.EnvFile)
+	// Grab sidecar env files, if present.
+	for sidecarName, sidecar := range sc {
+		envFiles[sidecarName] = aws.StringValue(sidecar.EnvFile)
+	}
+	// If the Firelens Sidecar Pattern has an env file specified, get it as well.
+	envFiles[FirelensContainerName] = aws.StringValue(lc.EnvFile)
+	return envFiles
+}
+
+func buildArgs(contextDir string, buildArgs map[string]*DockerBuildArgs, sc map[string]*SidecarConfig) (map[string]*DockerBuildArgs, error) {
+	for name, config := range sc {
+		if _, ok := config.ImageURI(); !ok {
+			buildArgs[name] = config.Image.Advanced.BuildConfig(contextDir)
+		}
+	}
+	return buildArgs, nil
 }

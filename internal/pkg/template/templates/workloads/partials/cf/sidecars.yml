@@ -3,14 +3,25 @@
   Image: {{ .LogConfig.Image }}
   Environment:
 {{include "envvars-common" . | indent 2}}
-{{if .LogConfig.Variables}}{{range $name, $value := .LogConfig.Variables}}
-  - Name: {{$name}}
-    Value: {{$value | printf "%q"}}{{end}}{{end}}
+{{if .LogConfig.Variables}}
+{{include "variables" .LogConfig | indent 2 }}
+{{end}}
+  EnvironmentFiles:
+    - !If
+      - HasLoggingEnvFile
+      - Type: "s3"
+        Value: !Ref LoggingEnvFileARN
+      - !Ref "AWS::NoValue"
 {{- if .LogConfig.Secrets}}
   Secrets:
   {{- range $name, $secret := .LogConfig.Secrets}}
   - Name: {{$name}}
-    ValueFrom: {{if not $secret.RequiresSub }}{{$secret.ValueFrom}}{{- else}} !Sub 'arn:${AWS::Partition}:{{$secret.Service}}:${AWS::Region}:${AWS::AccountId}:{{$secret.ValueFrom}}' {{- end }}
+  {{- if $secret.RequiresImport}}
+    ValueFrom:
+      Fn::ImportValue: {{ quote $secret.ValueFrom }}
+  {{- else}}
+    ValueFrom: {{if not $secret.RequiresSub }} {{$secret.ValueFrom}} {{- else}} !Sub 'arn:${AWS::Partition}:{{$secret.Service}}:${AWS::Region}:${AWS::AccountId}:{{$secret.ValueFrom}}' {{- end}}
+  {{- end}}
   {{- end}}
 {{- end}}
   FirelensConfiguration:
@@ -44,13 +55,16 @@
 {{- if $sidecar.Essential}}
   Essential: {{$sidecar.Essential}}
 {{- end}}
-{{include "image-overrides" . | indent 2}}  
-{{- if $sidecar.Port}}
+{{include "image-overrides" . | indent 2}}
+{{- if $sidecar.PortMappings}}
   PortMappings:
-    - ContainerPort: {{$sidecar.Port}}
-    {{- if $sidecar.Protocol}}
-      Protocol: {{$sidecar.Protocol}}
-    {{- end}}
+    {{- range $portMapping := $sidecar.PortMappings }}
+    - ContainerPort: {{ $portMapping.ContainerPort }}
+  {{- if and (eq $.HTTPTargetContainer.Name $sidecar.Name) (eq $.HTTPTargetContainer.Port (strconvUint16 $portMapping.ContainerPort))}}
+      Name: target
+  {{- end}}
+      Protocol: {{ $portMapping.Protocol }}
+{{- end}}
 {{- end}}
 {{- if $sidecar.HealthCheck}}
   HealthCheck:
@@ -64,11 +78,22 @@
 {{/* "$" denotes the parent WorkloadOpts, whereas "." is the individual container. */}}
 {{include "envvars-common" $ | indent 2}}
 {{include "envvars-container" . | indent 2}}
+  EnvironmentFiles:
+    - !If
+      - HasEnvFileFor{{ logicalIDSafe $sidecar.Name}}
+      - Type: "s3"
+        Value: !Ref EnvFileARNFor{{ logicalIDSafe $sidecar.Name}}
+      - !Ref "AWS::NoValue"
 {{- if $sidecar.Secrets}}
   Secrets:
   {{- range $name, $secret := $sidecar.Secrets}}
   - Name: {{$name}}
-    ValueFrom: {{if not $secret.RequiresSub }}{{$secret.ValueFrom}}{{- else}} !Sub 'arn:${AWS::Partition}:{{$secret.Service}}:${AWS::Region}:${AWS::AccountId}:{{$secret.ValueFrom}}' {{- end }}
+  {{- if $secret.RequiresImport}}
+    ValueFrom:
+      Fn::ImportValue: {{ quote $secret.ValueFrom }}
+  {{- else}}
+    ValueFrom: {{if not $secret.RequiresSub }} {{$secret.ValueFrom}} {{- else}} !Sub 'arn:${AWS::Partition}:{{$secret.Service}}:${AWS::Region}:${AWS::AccountId}:{{$secret.ValueFrom}}' {{- end}}
+  {{- end}}
   {{- end}}
 {{- end}}
   LogConfiguration:

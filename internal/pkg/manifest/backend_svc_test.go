@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -24,20 +25,25 @@ func TestNewBackendSvc(t *testing.T) {
 				WorkloadProps: WorkloadProps{
 					Name:       "subscribers",
 					Dockerfile: "./subscribers/Dockerfile",
+					PrivateOnlyEnvironments: []string{
+						"metrics",
+					},
 				},
 			},
 			wantedManifest: &BackendService{
 				Workload: Workload{
 					Name: aws.String("subscribers"),
-					Type: aws.String(BackendServiceType),
+					Type: aws.String(manifestinfo.BackendServiceType),
 				},
 				BackendServiceConfig: BackendServiceConfig{
 					ImageConfig: ImageWithHealthcheckAndOptionalPort{
 						ImageWithOptionalPort: ImageWithOptionalPort{
 							Image: Image{
-								Build: BuildArgsOrString{
-									BuildArgs: DockerBuildArgs{
-										Dockerfile: aws.String("./subscribers/Dockerfile"),
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build: BuildArgsOrString{
+										BuildArgs: DockerBuildArgs{
+											Dockerfile: aws.String("./subscribers/Dockerfile"),
+										},
 									},
 								},
 							},
@@ -61,6 +67,17 @@ func TestNewBackendSvc(t *testing.T) {
 						},
 					},
 				},
+				Environments: map[string]*BackendServiceConfig{
+					"metrics": {
+						Network: NetworkConfig{
+							VPC: vpcConfig{
+								Placement: PlacementArgOrString{
+									PlacementString: placementStringP(PrivateSubnetPlacement),
+								},
+							},
+						},
+					},
+				},
 			},
 		},
 		"with custom healthcheck command": {
@@ -77,13 +94,15 @@ func TestNewBackendSvc(t *testing.T) {
 			wantedManifest: &BackendService{
 				Workload: Workload{
 					Name: aws.String("subscribers"),
-					Type: aws.String(BackendServiceType),
+					Type: aws.String(manifestinfo.BackendServiceType),
 				},
 				BackendServiceConfig: BackendServiceConfig{
 					ImageConfig: ImageWithHealthcheckAndOptionalPort{
 						ImageWithOptionalPort: ImageWithOptionalPort{
 							Image: Image{
-								Location: aws.String("mockImage"),
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Location: aws.String("mockImage"),
+								},
 							},
 							Port: aws.Uint16(8080),
 						},
@@ -122,15 +141,17 @@ func TestNewBackendSvc(t *testing.T) {
 			wantedManifest: &BackendService{
 				Workload: Workload{
 					Name: aws.String("subscribers"),
-					Type: aws.String(BackendServiceType),
+					Type: aws.String(manifestinfo.BackendServiceType),
 				},
 				BackendServiceConfig: BackendServiceConfig{
 					ImageConfig: ImageWithHealthcheckAndOptionalPort{
 						ImageWithOptionalPort: ImageWithOptionalPort{
 							Image: Image{
-								Build: BuildArgsOrString{
-									BuildArgs: DockerBuildArgs{
-										Dockerfile: aws.String("./subscribers/Dockerfile"),
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build: BuildArgsOrString{
+										BuildArgs: DockerBuildArgs{
+											Dockerfile: aws.String("./subscribers/Dockerfile"),
+										},
 									},
 								},
 							},
@@ -190,8 +211,10 @@ func TestBackendService_RequiredEnvironmentFeatures(t *testing.T) {
 		},
 		"internal alb feature required": {
 			mft: func(svc *BackendService) {
-				svc.RoutingRule = RoutingRuleConfiguration{
-					Path: aws.String("/mock_path"),
+				svc.HTTP = HTTP{
+					Main: RoutingRule{
+						Path: aws.String("/mock_path"),
+					},
 				}
 			},
 			wanted: []string{template.InternalALBFeatureName},
@@ -250,7 +273,7 @@ func TestBackendService_RequiredEnvironmentFeatures(t *testing.T) {
 			inSvc := BackendService{
 				Workload: Workload{
 					Name: aws.String("mock-svc"),
-					Type: aws.String(BackendServiceType),
+					Type: aws.String(manifestinfo.BackendServiceType),
 				},
 			}
 			tc.mft(&inSvc)
@@ -345,15 +368,17 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 	mockBackendServiceWithNoEnvironments := BackendService{
 		Workload: Workload{
 			Name: aws.String("phonetool"),
-			Type: aws.String(BackendServiceType),
+			Type: aws.String(manifestinfo.BackendServiceType),
 		},
 		BackendServiceConfig: BackendServiceConfig{
 			ImageConfig: ImageWithHealthcheckAndOptionalPort{
 				ImageWithOptionalPort: ImageWithOptionalPort{
 					Image: Image{
-						Build: BuildArgsOrString{
-							BuildArgs: DockerBuildArgs{
-								Dockerfile: aws.String("./Dockerfile"),
+						ImageLocationOrBuild: ImageLocationOrBuild{
+							Build: BuildArgsOrString{
+								BuildArgs: DockerBuildArgs{
+									Dockerfile: aws.String("./Dockerfile"),
+								},
 							},
 						},
 					},
@@ -428,8 +453,10 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 			},
 			Sidecars: map[string]*SidecarConfig{
 				"xray": {
-					Port:  aws.String("2000/udp"),
-					Image: aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+					Port: aws.String("2000/udp"),
+					Image: Union[*string, ImageLocationOrBuild]{
+						Basic: aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+					},
 				},
 			},
 			Logging: Logging{
@@ -457,8 +484,12 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 						},
 					},
 					CPU: aws.Int(512),
-					Variables: map[string]string{
-						"LOG_LEVEL": "",
+					Variables: map[string]Variable{
+						"LOG_LEVEL": {
+							stringOrFromCFN{
+								Plain: stringP(""),
+							},
+						},
 					},
 				},
 				Sidecars: map[string]*SidecarConfig{
@@ -478,15 +509,17 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 	mockBackendServiceWithImageOverrideBuildByLocation := BackendService{
 		Workload: Workload{
 			Name: aws.String("phonetool"),
-			Type: aws.String(BackendServiceType),
+			Type: aws.String(manifestinfo.BackendServiceType),
 		},
 		BackendServiceConfig: BackendServiceConfig{
 			ImageConfig: ImageWithHealthcheckAndOptionalPort{
 				ImageWithOptionalPort: ImageWithOptionalPort{
 					Image: Image{
-						Build: BuildArgsOrString{
-							BuildArgs: DockerBuildArgs{
-								Dockerfile: aws.String("./Dockerfile"),
+						ImageLocationOrBuild: ImageLocationOrBuild{
+							Build: BuildArgsOrString{
+								BuildArgs: DockerBuildArgs{
+									Dockerfile: aws.String("./Dockerfile"),
+								},
 							},
 						},
 					},
@@ -498,7 +531,9 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 				ImageConfig: ImageWithHealthcheckAndOptionalPort{
 					ImageWithOptionalPort: ImageWithOptionalPort{
 						Image: Image{
-							Location: aws.String("env-override location"),
+							ImageLocationOrBuild: ImageLocationOrBuild{
+								Location: aws.String("env-override location"),
+							},
 						},
 					},
 				},
@@ -508,13 +543,15 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 	mockBackendServiceWithImageOverrideLocationByLocation := BackendService{
 		Workload: Workload{
 			Name: aws.String("phonetool"),
-			Type: aws.String(BackendServiceType),
+			Type: aws.String(manifestinfo.BackendServiceType),
 		},
 		BackendServiceConfig: BackendServiceConfig{
 			ImageConfig: ImageWithHealthcheckAndOptionalPort{
 				ImageWithOptionalPort: ImageWithOptionalPort{
 					Image: Image{
-						Location: aws.String("original location"),
+						ImageLocationOrBuild: ImageLocationOrBuild{
+							Location: aws.String("original location"),
+						},
 					},
 				},
 			},
@@ -524,7 +561,9 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 				ImageConfig: ImageWithHealthcheckAndOptionalPort{
 					ImageWithOptionalPort: ImageWithOptionalPort{
 						Image: Image{
-							Location: aws.String("env-override location"),
+							ImageLocationOrBuild: ImageLocationOrBuild{
+								Location: aws.String("env-override location"),
+							},
 						},
 					},
 				},
@@ -534,16 +573,18 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 	mockBackendServiceWithImageOverrideBuildByBuild := BackendService{
 		Workload: Workload{
 			Name: aws.String("phonetool"),
-			Type: aws.String(BackendServiceType),
+			Type: aws.String(manifestinfo.BackendServiceType),
 		},
 		BackendServiceConfig: BackendServiceConfig{
 			ImageConfig: ImageWithHealthcheckAndOptionalPort{
 				ImageWithOptionalPort: ImageWithOptionalPort{
 					Image: Image{
-						Build: BuildArgsOrString{
-							BuildArgs: DockerBuildArgs{
-								Dockerfile: aws.String("original dockerfile"),
-								Context:    aws.String("original context"),
+						ImageLocationOrBuild: ImageLocationOrBuild{
+							Build: BuildArgsOrString{
+								BuildArgs: DockerBuildArgs{
+									Dockerfile: aws.String("original dockerfile"),
+									Context:    aws.String("original context"),
+								},
 							},
 						},
 					},
@@ -555,8 +596,10 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 				ImageConfig: ImageWithHealthcheckAndOptionalPort{
 					ImageWithOptionalPort: ImageWithOptionalPort{
 						Image: Image{
-							Build: BuildArgsOrString{
-								BuildString: aws.String("env overridden dockerfile"),
+							ImageLocationOrBuild: ImageLocationOrBuild{
+								Build: BuildArgsOrString{
+									BuildString: aws.String("env overridden dockerfile"),
+								},
 							},
 						},
 					},
@@ -567,13 +610,15 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 	mockBackendServiceWithImageOverrideLocationByBuild := BackendService{
 		Workload: Workload{
 			Name: aws.String("phonetool"),
-			Type: aws.String(BackendServiceType),
+			Type: aws.String(manifestinfo.BackendServiceType),
 		},
 		BackendServiceConfig: BackendServiceConfig{
 			ImageConfig: ImageWithHealthcheckAndOptionalPort{
 				ImageWithOptionalPort: ImageWithOptionalPort{
 					Image: Image{
-						Location: aws.String("original location"),
+						ImageLocationOrBuild: ImageLocationOrBuild{
+							Location: aws.String("original location"),
+						},
 					},
 				},
 			},
@@ -583,8 +628,10 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 				ImageConfig: ImageWithHealthcheckAndOptionalPort{
 					ImageWithOptionalPort: ImageWithOptionalPort{
 						Image: Image{
-							Build: BuildArgsOrString{
-								BuildString: aws.String("env overridden dockerfile"),
+							ImageLocationOrBuild: ImageLocationOrBuild{
+								Build: BuildArgsOrString{
+									BuildString: aws.String("env overridden dockerfile"),
+								},
 							},
 						},
 					},
@@ -652,14 +699,20 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 								CPU: mockConfig,
 							},
 						},
-						Variables: map[string]string{
-							"LOG_LEVEL": "",
+						Variables: map[string]Variable{
+							"LOG_LEVEL": {
+								stringOrFromCFN{
+									Plain: stringP(""),
+								},
+							},
 						},
 					},
 					Sidecars: map[string]*SidecarConfig{
 						"xray": {
-							Port:       aws.String("2000/udp"),
-							Image:      aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+							Port: aws.String("2000/udp"),
+							Image: Union[*string, ImageLocationOrBuild]{
+								Basic: aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+							},
 							CredsParam: aws.String("some arn"),
 						},
 					},
@@ -681,13 +734,15 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 			wanted: &BackendService{
 				Workload: Workload{
 					Name: aws.String("phonetool"),
-					Type: aws.String(BackendServiceType),
+					Type: aws.String(manifestinfo.BackendServiceType),
 				},
 				BackendServiceConfig: BackendServiceConfig{
 					ImageConfig: ImageWithHealthcheckAndOptionalPort{
 						ImageWithOptionalPort: ImageWithOptionalPort{
 							Image: Image{
-								Location: aws.String("env-override location"),
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Location: aws.String("env-override location"),
+								},
 							},
 						},
 					},
@@ -702,13 +757,15 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 			wanted: &BackendService{
 				Workload: Workload{
 					Name: aws.String("phonetool"),
-					Type: aws.String(BackendServiceType),
+					Type: aws.String(manifestinfo.BackendServiceType),
 				},
 				BackendServiceConfig: BackendServiceConfig{
 					ImageConfig: ImageWithHealthcheckAndOptionalPort{
 						ImageWithOptionalPort: ImageWithOptionalPort{
 							Image: Image{
-								Location: aws.String("env-override location"),
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Location: aws.String("env-override location"),
+								},
 							},
 						},
 					},
@@ -722,14 +779,16 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 			wanted: &BackendService{
 				Workload: Workload{
 					Name: aws.String("phonetool"),
-					Type: aws.String(BackendServiceType),
+					Type: aws.String(manifestinfo.BackendServiceType),
 				},
 				BackendServiceConfig: BackendServiceConfig{
 					ImageConfig: ImageWithHealthcheckAndOptionalPort{
 						ImageWithOptionalPort: ImageWithOptionalPort{
 							Image: Image{
-								Build: BuildArgsOrString{
-									BuildString: aws.String("env overridden dockerfile"),
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build: BuildArgsOrString{
+										BuildString: aws.String("env overridden dockerfile"),
+									},
 								},
 							},
 						},
@@ -744,14 +803,16 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 			wanted: &BackendService{
 				Workload: Workload{
 					Name: aws.String("phonetool"),
-					Type: aws.String(BackendServiceType),
+					Type: aws.String(manifestinfo.BackendServiceType),
 				},
 				BackendServiceConfig: BackendServiceConfig{
 					ImageConfig: ImageWithHealthcheckAndOptionalPort{
 						ImageWithOptionalPort: ImageWithOptionalPort{
 							Image: Image{
-								Build: BuildArgsOrString{
-									BuildString: aws.String("env overridden dockerfile"),
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build: BuildArgsOrString{
+										BuildString: aws.String("env overridden dockerfile"),
+									},
 								},
 							},
 						},
@@ -934,6 +995,216 @@ func TestBackendSvc_ApplyEnv_CountOverrides(t *testing.T) {
 
 			// THEN
 			require.Equal(t, tc.expected, actual)
+		})
+	}
+}
+
+func TestBackendService_ExposedPorts(t *testing.T) {
+	testCases := map[string]struct {
+		mft                *BackendService
+		wantedExposedPorts map[string][]ExposedPort
+	}{
+		"expose primary container port through target_port": {
+			mft: &BackendService{
+				Workload: Workload{
+					Name: aws.String("frontend"),
+				},
+				BackendServiceConfig: BackendServiceConfig{
+					ImageConfig: ImageWithHealthcheckAndOptionalPort{},
+					HTTP: HTTP{
+						Main: RoutingRule{
+							TargetPort: aws.Uint16(81),
+						},
+					},
+					Sidecars: map[string]*SidecarConfig{
+						"xray": {
+							Port: aws.String("2000"),
+							Image: Union[*string, ImageLocationOrBuild]{
+								Basic: aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+							},
+							CredsParam: aws.String("some arn"),
+						},
+					},
+				},
+			},
+			wantedExposedPorts: map[string][]ExposedPort{
+				"frontend": {
+					{
+						Port:          81,
+						ContainerName: "frontend",
+						Protocol:      "tcp",
+					},
+				},
+				"xray": {
+					{
+						Port:                 2000,
+						ContainerName:        "xray",
+						Protocol:             "tcp",
+						isDefinedByContainer: true,
+					},
+				},
+			},
+		},
+		"expose two primary container port internally through image.port and target_port": {
+			mft: &BackendService{
+				Workload: Workload{
+					Name: aws.String("frontend"),
+				},
+				BackendServiceConfig: BackendServiceConfig{
+					ImageConfig: ImageWithHealthcheckAndOptionalPort{
+						ImageWithOptionalPort: ImageWithOptionalPort{
+							Port: aws.Uint16(80),
+						},
+					},
+					HTTP: HTTP{
+						Main: RoutingRule{
+							TargetPort: aws.Uint16(81),
+						},
+					},
+					Sidecars: map[string]*SidecarConfig{
+						"xray": {
+							Port: aws.String("2000"),
+							Image: Union[*string, ImageLocationOrBuild]{
+								Basic: aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+							},
+							CredsParam: aws.String("some arn"),
+						},
+					},
+				},
+			},
+			wantedExposedPorts: map[string][]ExposedPort{
+				"frontend": {
+					{
+						Port:                 80,
+						ContainerName:        "frontend",
+						Protocol:             "tcp",
+						isDefinedByContainer: true,
+					},
+					{
+						Port:          81,
+						ContainerName: "frontend",
+						Protocol:      "tcp",
+					},
+				},
+				"xray": {
+					{
+						Port:                 2000,
+						ContainerName:        "xray",
+						Protocol:             "tcp",
+						isDefinedByContainer: true,
+					},
+				},
+			},
+		},
+		"expose two primary container port internally through image.port and target_port and target_container": {
+			mft: &BackendService{
+				Workload: Workload{
+					Name: aws.String("frontend"),
+				},
+				BackendServiceConfig: BackendServiceConfig{
+					ImageConfig: ImageWithHealthcheckAndOptionalPort{
+						ImageWithOptionalPort: ImageWithOptionalPort{
+							Port: aws.Uint16(80),
+						},
+					},
+					HTTP: HTTP{
+						Main: RoutingRule{
+							TargetContainer: aws.String("frontend"),
+							TargetPort:      aws.Uint16(81),
+						},
+					},
+					Sidecars: map[string]*SidecarConfig{
+						"xray": {
+							Port: aws.String("2000"),
+							Image: Union[*string, ImageLocationOrBuild]{
+								Basic: aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+							},
+							CredsParam: aws.String("some arn"),
+						},
+					},
+				},
+			},
+			wantedExposedPorts: map[string][]ExposedPort{
+				"frontend": {
+					{
+						Port:                 80,
+						ContainerName:        "frontend",
+						Protocol:             "tcp",
+						isDefinedByContainer: true,
+					},
+					{
+						Port:          81,
+						ContainerName: "frontend",
+						Protocol:      "tcp",
+					},
+				},
+				"xray": {
+					{
+						Port:                 2000,
+						ContainerName:        "xray",
+						Protocol:             "tcp",
+						isDefinedByContainer: true,
+					},
+				},
+			},
+		},
+		"expose primary container port through image.port and sidecar container port through target_port and target_container": {
+			mft: &BackendService{
+				Workload: Workload{
+					Name: aws.String("frontend"),
+				},
+				BackendServiceConfig: BackendServiceConfig{
+					ImageConfig: ImageWithHealthcheckAndOptionalPort{
+						ImageWithOptionalPort: ImageWithOptionalPort{
+							Port: aws.Uint16(80),
+						},
+					},
+					HTTP: HTTP{
+						Main: RoutingRule{
+							TargetContainer: aws.String("xray"),
+							TargetPort:      aws.Uint16(81),
+						},
+					},
+					Sidecars: map[string]*SidecarConfig{
+						"xray": {
+							Image: Union[*string, ImageLocationOrBuild]{
+								Advanced: ImageLocationOrBuild{
+									Location: aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon"),
+								},
+							},
+							CredsParam: aws.String("some arn"),
+						},
+					},
+				},
+			},
+
+			wantedExposedPorts: map[string][]ExposedPort{
+				"frontend": {
+					{
+						Port:                 80,
+						ContainerName:        "frontend",
+						Protocol:             "tcp",
+						isDefinedByContainer: true,
+					},
+				},
+				"xray": {
+					{
+						Port:          81,
+						ContainerName: "xray",
+						Protocol:      "tcp",
+					},
+				},
+			},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			// WHEN
+			actual, err := tc.mft.ExposedPorts()
+
+			// THEN
+			require.NoError(t, err)
+			require.Equal(t, tc.wantedExposedPorts, actual.PortsForContainer)
 		})
 	}
 }

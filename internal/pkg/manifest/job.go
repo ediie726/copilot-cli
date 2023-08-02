@@ -5,25 +5,14 @@ package manifest
 
 import (
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/imdario/mergo"
 )
 
 const (
-	// ScheduledJobType is a recurring ECS Fargate task which runs on a schedule.
-	ScheduledJobType = "Scheduled Job"
-)
-
-const (
 	scheduledJobManifestPath = "workloads/jobs/scheduled-job/manifest.yml"
 )
-
-// JobTypes returns the list of supported job manifest types.
-func JobTypes() []string {
-	return []string{
-		ScheduledJobType,
-	}
-}
 
 // ScheduledJob holds the configuration to build a container image that is run
 // periodically in a given environment with timeout and retry logic.
@@ -31,8 +20,7 @@ type ScheduledJob struct {
 	Workload           `yaml:",inline"`
 	ScheduledJobConfig `yaml:",inline"`
 	Environments       map[string]*ScheduledJobConfig `yaml:",flow"`
-
-	parser template.Parser
+	parser             template.Parser
 }
 
 func (s *ScheduledJob) subnets() *SubnetListOrArgs {
@@ -92,6 +80,17 @@ func NewScheduledJob(props *ScheduledJobProps) *ScheduledJob {
 		job.Retries = aws.Int(props.Retries)
 	}
 	job.Timeout = stringP(props.Timeout)
+	for _, envName := range props.PrivateOnlyEnvironments {
+		job.Environments[envName] = &ScheduledJobConfig{
+			Network: NetworkConfig{
+				VPC: vpcConfig{
+					Placement: PlacementArgOrString{
+						PlacementString: placementStringP(PrivateSubnetPlacement),
+					},
+				},
+			},
+		}
+	}
 	job.parser = template.New()
 	return job
 }
@@ -134,29 +133,35 @@ func (s *ScheduledJob) requiredEnvironmentFeatures() []string {
 
 // Publish returns the list of topics where notifications can be published.
 func (j *ScheduledJob) Publish() []Topic {
-	return j.ScheduledJobConfig.PublishConfig.Topics
+	return j.ScheduledJobConfig.PublishConfig.publishedTopics()
 }
 
-// BuildArgs returns a docker.BuildArguments object for the job given a workspace root.
-func (j *ScheduledJob) BuildArgs(wsRoot string) *DockerBuildArgs {
-	return j.ImageConfig.Image.BuildConfig(wsRoot)
+// BuildArgs returns a docker.BuildArguments object for the job given a context directory.
+func (j *ScheduledJob) BuildArgs(contextDir string) (map[string]*DockerBuildArgs, error) {
+	required, err := requiresBuild(j.ImageConfig.Image)
+	if err != nil {
+		return nil, err
+	}
+	// Creating an map to store buildArgs of all sidecar images and main container image.
+	buildArgsPerContainer := make(map[string]*DockerBuildArgs, len(j.Sidecars)+1)
+	if required {
+		buildArgsPerContainer[aws.StringValue(j.Name)] = j.ImageConfig.Image.BuildConfig(contextDir)
+	}
+	return buildArgs(contextDir, buildArgsPerContainer, j.Sidecars)
 }
 
-// BuildRequired returns if the service requires building from the local Dockerfile.
-func (j *ScheduledJob) BuildRequired() (bool, error) {
-	return requiresBuild(j.ImageConfig.Image)
-}
-
-// EnvFile returns the location of the env file against the ws root directory.
-func (j *ScheduledJob) EnvFile() string {
-	return aws.StringValue(j.TaskConfig.EnvFile)
+// EnvFiles returns the locations of all env files against the ws root directory.
+// This method returns a map[string]string where the keys are container names
+// and the values are either env file paths or empty strings.
+func (j *ScheduledJob) EnvFiles() map[string]string {
+	return envFiles(j.Name, j.TaskConfig, j.Logging, j.Sidecars)
 }
 
 // newDefaultScheduledJob returns an empty ScheduledJob with only the default values set.
 func newDefaultScheduledJob() *ScheduledJob {
 	return &ScheduledJob{
 		Workload: Workload{
-			Type: aws.String(ScheduledJobType),
+			Type: aws.String(manifestinfo.ScheduledJobType),
 		},
 		ScheduledJobConfig: ScheduledJobConfig{
 			ImageConfig: ImageWithHealthcheck{},
@@ -166,7 +171,7 @@ func newDefaultScheduledJob() *ScheduledJob {
 				Count: Count{
 					Value: aws.Int(1),
 					AdvancedCount: AdvancedCount{ // Leave advanced count empty while passing down the type of the workload.
-						workloadType: ScheduledJobType,
+						workloadType: manifestinfo.ScheduledJobType,
 					},
 				},
 			},
@@ -178,5 +183,23 @@ func newDefaultScheduledJob() *ScheduledJob {
 				},
 			},
 		},
+		Environments: map[string]*ScheduledJobConfig{},
 	}
+}
+
+// ExposedPorts returns all the ports that are sidecar container ports available to receive traffic.
+func (j *ScheduledJob) ExposedPorts() (ExposedPortsIndex, error) {
+	var exposedPorts []ExposedPort
+	for name, sidecar := range j.Sidecars {
+		out, err := sidecar.exposedPorts(name)
+		if err != nil {
+			return ExposedPortsIndex{}, err
+		}
+		exposedPorts = append(exposedPorts, out...)
+	}
+	portsForContainer, containerForPort := prepareParsedExposedPortsMap(sortExposedPorts(exposedPorts))
+	return ExposedPortsIndex{
+		PortsForContainer: portsForContainer,
+		ContainerForPort:  containerForPort,
+	}, nil
 }

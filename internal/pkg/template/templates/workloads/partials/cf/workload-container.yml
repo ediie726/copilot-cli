@@ -28,17 +28,25 @@
 {{- end}}
 {{- if eq .WorkloadType "Load Balanced Web Service"}}
   PortMappings:
-    - ContainerPort: !Ref ContainerPort
-{{- if .NLB}} {{ $nlbListener := .NLB.Listener }} 
-  {{- if and (eq $nlbListener.TargetContainer .WorkloadName) (ne $nlbListener.TargetPort .NLB.MainContainerPort)}}
-  {{/*No need to add additional port if the target port is the same as image port*/}}
-    - ContainerPort: {{$nlbListener.TargetPort}}
-      Protocol: {{if eq $nlbListener.Protocol "UDP"}}udp{{else}}tcp{{end}}
+  {{- range $portMapping := .PortMappings }}
+    - ContainerPort: {{ $portMapping.ContainerPort }}
+      Protocol: {{ $portMapping.Protocol }}
+  {{- if and (eq $.HTTPTargetContainer.Name $.WorkloadName) (eq $.HTTPTargetContainer.Port (strconvUint16 $portMapping.ContainerPort))}}
+      Name: target
   {{- end}}
-{{- end}}
+  {{- end}}
 {{- end}} {{/* end if eq .WorkloadType "Load Balanced Web Service"*/}}
 {{- if eq .WorkloadType "Backend Service"}}
-  PortMappings: !If [ExposePort, [{ContainerPort: !Ref ContainerPort}], !Ref "AWS::NoValue"]
+  {{- if .PortMappings}}
+  PortMappings:
+  {{- range $portMapping := .PortMappings}}
+    - ContainerPort: {{$portMapping.ContainerPort}}
+      Protocol: {{ $portMapping.Protocol }}
+  {{- if and (eq $.HTTPTargetContainer.Name $.WorkloadName) (eq $.HTTPTargetContainer.Port (strconvUint16 $portMapping.ContainerPort ))}}
+      Name: target
+  {{- end}}
+  {{- end}}
+{{- end}}
 {{- end}}
 {{- if .HealthCheck}}
   HealthCheck:
@@ -47,6 +55,9 @@
     Retries: {{.HealthCheck.Retries}}
     StartPeriod: {{.HealthCheck.StartPeriod}}
     Timeout: {{.HealthCheck.Timeout}}
+{{- end}}
+{{- if and .Storage .Storage.ReadonlyRootFS}}
+  ReadonlyRootFilesystem: {{.Storage.ReadonlyRootFS}}
 {{- end}}
 {{- if .CredentialsParameter}}
   RepositoryCredentials:

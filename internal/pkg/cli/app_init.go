@@ -7,8 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/aws/copilot-cli/internal/pkg/aws/iam"
+	"github.com/aws/copilot-cli/internal/pkg/version"
+	"github.com/spf13/afero"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/aws-sdk-go/service/ssm"
 
 	"github.com/spf13/cobra"
@@ -34,9 +40,10 @@ const (
 )
 
 type initAppVars struct {
-	name         string
-	domainName   string
-	resourceTags map[string]string
+	name                string
+	permissionsBoundary string
+	domainName          string
+	resourceTags        map[string]string
 }
 
 type initAppOpts struct {
@@ -45,13 +52,17 @@ type initAppOpts struct {
 	identity             identityService
 	store                applicationStore
 	route53              domainHostedZoneGetter
-	domainInfoGetter     domainInfoGetter
-	ws                   wsAppManager
 	cfn                  appDeployer
 	prompt               prompter
 	prog                 progress
+	iam                  policyLister
+	iamRoleManager       roleManager
 	isSessionFromEnvVars func() (bool, error)
 
+	existingWorkspace func() (wsAppManager, error)
+	newWorkspace      func(appName string) (wsAppManager, error)
+
+	// Cached variables.
 	cachedHostedZoneID string
 }
 
@@ -60,24 +71,27 @@ func newInitAppOpts(vars initAppVars) (*initAppOpts, error) {
 	if err != nil {
 		return nil, fmt.Errorf("default session: %w", err)
 	}
-	ws, err := workspace.New()
-	if err != nil {
-		return nil, fmt.Errorf("new workspace: %w", err)
-	}
-
+	fs := afero.NewOsFs()
 	identity := identity.New(sess)
+	iamClient := iam.New(sess)
 	return &initAppOpts{
-		initAppVars:      vars,
-		identity:         identity,
-		store:            config.NewSSMStore(identity, ssm.New(sess), aws.StringValue(sess.Config.Region)),
-		route53:          route53.New(sess),
-		domainInfoGetter: route53.NewRoute53Domains(sess),
-		ws:               ws,
-		cfn:              cloudformation.New(sess, cloudformation.WithProgressTracker(os.Stderr)),
-		prompt:           prompt.New(),
-		prog:             termprogress.NewSpinner(log.DiagnosticWriter),
+		initAppVars:    vars,
+		identity:       identity,
+		store:          config.NewSSMStore(identity, ssm.New(sess), aws.StringValue(sess.Config.Region)),
+		route53:        route53.New(sess),
+		cfn:            cloudformation.New(sess, cloudformation.WithProgressTracker(os.Stderr)),
+		prompt:         prompt.New(),
+		prog:           termprogress.NewSpinner(log.DiagnosticWriter),
+		iam:            iamClient,
+		iamRoleManager: iamClient,
 		isSessionFromEnvVars: func() (bool, error) {
 			return sessions.AreCredsFromEnvVars(sess)
+		},
+		existingWorkspace: func() (wsAppManager, error) {
+			return workspace.Use(fs)
+		},
+		newWorkspace: func(appName string) (wsAppManager, error) {
+			return workspace.Create(appName, fs)
 		},
 	}, nil
 }
@@ -89,13 +103,27 @@ func (o *initAppOpts) Validate() error {
 			return err
 		}
 	}
+	if o.permissionsBoundary != "" {
+		// Best effort to get the permission boundary name if ARN
+		// (for example: arn:aws:iam::1234567890:policy/myPermissionsBoundaryPolicy).
+		if arn.IsARN(o.permissionsBoundary) {
+			parsed, err := arn.Parse(o.permissionsBoundary)
+			if err != nil {
+				return fmt.Errorf("parse permission boundary ARN: %w", err)
+			}
+			o.permissionsBoundary = strings.TrimPrefix(parsed.Resource, "policy/")
+		}
+		if err := o.validatePermBound(o.permissionsBoundary); err != nil {
+			return err
+		}
+	}
 	if o.domainName != "" {
+		o.prog.Start(fmt.Sprintf("Validating ownership of %q", o.domainName))
+		defer o.prog.Stop("")
 		if err := validateDomainName(o.domainName); err != nil {
 			return fmt.Errorf("domain name %s is invalid: %w", o.domainName, err)
 		}
-		if err := o.isDomainOwned(); err != nil {
-			return err
-		}
+		o.warnIfDomainIsNotOwned()
 		id, err := o.domainHostedZoneID(o.domainName)
 		if err != nil {
 			return err
@@ -120,32 +148,46 @@ https://aws.github.io/copilot-cli/docs/credentials/`)
 		log.Infoln()
 	}
 
-	// When there's a local application.
-	summary, err := o.ws.Summary()
+	ws, err := o.existingWorkspace()
 	if err == nil {
-		if o.name == "" {
-			log.Infoln(fmt.Sprintf(
-				"Your workspace is registered to application %s.",
-				color.HighlightUserInput(summary.Application)))
-			o.name = summary.Application
-			return nil
-		}
-		if o.name != summary.Application {
-			summaryPath := displayPath(summary.Path)
-			if summaryPath == "" {
-				summaryPath = summary.Path
+		// When there's a local application.
+		summary, err := ws.Summary()
+		if err == nil {
+			if o.name == "" {
+				log.Infoln(fmt.Sprintf(
+					"Your workspace is registered to application %s.",
+					color.HighlightUserInput(summary.Application)))
+				if err := o.validateAppName(summary.Application); err != nil {
+					return err
+				}
+				o.name = summary.Application
+				return nil
 			}
+			if o.name != summary.Application {
+				summaryPath := displayPath(summary.Path)
+				if summaryPath == "" {
+					summaryPath = summary.Path
+				}
 
-			log.Errorf(`Workspace is already registered with application %s instead of %s.
+				log.Errorf(`Workspace is already registered with application %s instead of %s.
 If you'd like to delete the application locally, you can delete the file at %s.
 If you'd like to delete the application and all of its resources, run %s.
 `,
-				summary.Application,
-				o.name,
-				summaryPath,
-				color.HighlightCode("copilot app delete"))
-			return fmt.Errorf("workspace already registered with %s", summary.Application)
+					summary.Application,
+					o.name,
+					summaryPath,
+					color.HighlightCode("copilot app delete"))
+				return fmt.Errorf("workspace already registered with %s", summary.Application)
+			}
 		}
+
+		var errNoAppSummary *workspace.ErrNoAssociatedApplication
+		if !errors.As(err, &errNoAppSummary) {
+			return err
+		}
+	}
+	if !workspace.IsEmptyErr(err) {
+		return err
 	}
 
 	// Flag is set by user.
@@ -176,7 +218,7 @@ func (o *initAppOpts) Execute() error {
 		return fmt.Errorf("get identity: %w", err)
 	}
 
-	err = o.ws.Create(o.name)
+	_, err = o.newWorkspace(o.name)
 	if err != nil {
 		return fmt.Errorf("create new workspace with application name %s: %w", o.name, err)
 	}
@@ -188,23 +230,25 @@ func (o *initAppOpts) Execute() error {
 		}
 	}
 	err = o.cfn.DeployApp(&deploy.CreateAppInput{
-		Name:               o.name,
-		AccountID:          caller.Account,
-		DomainName:         o.domainName,
-		DomainHostedZoneID: hostedZoneID,
-		AdditionalTags:     o.resourceTags,
-		Version:            deploy.LatestAppTemplateVersion,
+		Name:                o.name,
+		AccountID:           caller.Account,
+		DomainName:          o.domainName,
+		DomainHostedZoneID:  hostedZoneID,
+		PermissionsBoundary: o.permissionsBoundary,
+		AdditionalTags:      o.resourceTags,
+		Version:             version.LatestTemplateVersion(),
 	})
 	if err != nil {
 		return err
 	}
 
 	if err := o.store.CreateApplication(&config.Application{
-		AccountID:          caller.Account,
-		Name:               o.name,
-		Domain:             o.domainName,
-		DomainHostedZoneID: hostedZoneID,
-		Tags:               o.resourceTags,
+		AccountID:           caller.Account,
+		Name:                o.name,
+		Domain:              o.domainName,
+		DomainHostedZoneID:  hostedZoneID,
+		PermissionsBoundary: o.permissionsBoundary,
+		Tags:                o.resourceTags,
 	}); err != nil {
 		return err
 	}
@@ -214,40 +258,61 @@ func (o *initAppOpts) Execute() error {
 }
 
 func (o *initAppOpts) validateAppName(name string) error {
-	if err := validateAppName(name); err != nil {
+	if err := validateAppNameString(name); err != nil {
 		return err
 	}
 	app, err := o.store.GetApplication(name)
-	if err != nil {
-		var noSuchAppErr *config.ErrNoSuchApplication
-		if errors.As(err, &noSuchAppErr) {
+	if err == nil {
+		if o.domainName != "" && app.Domain != o.domainName {
+			return fmt.Errorf("application named %s already exists with a different domain name %s", name, app.Domain)
+		}
+		return nil
+	}
+	var noSuchAppErr *config.ErrNoSuchApplication
+	if errors.As(err, &noSuchAppErr) {
+		roleName := fmt.Sprintf("%s-adminrole", name)
+		tags, err := o.iamRoleManager.ListRoleTags(roleName)
+		// NOTE: This is a best-effort attempt to check if the app exists in other regions.
+		// The error either indicates that the role does not exist, or not.
+		// In the first case, it means that this is a valid app name, hence we don't error out.
+		// In the second case, since this is a best-effort, we don't need to surface the error either.
+		if err != nil {
 			return nil
 		}
-		return fmt.Errorf("get application %s: %w", name, err)
+		if _, hasTag := tags[deploy.AppTagKey]; hasTag {
+			return &errAppAlreadyExistsInAccount{appName: name}
+		}
+		return &errStackSetAdminRoleExistsInAccount{
+			appName:  name,
+			roleName: roleName,
+		}
 	}
-	if o.domainName != "" && app.Domain != o.domainName {
-		return fmt.Errorf("application named %s already exists with a different domain name %s", name, app.Domain)
-	}
-	return nil
+	return fmt.Errorf("get application %s: %w", name, err)
 }
 
-func (o *initAppOpts) isDomainOwned() error {
-	err := o.domainInfoGetter.IsRegisteredDomain(o.domainName)
+func (o *initAppOpts) validatePermBound(policyName string) error {
+	IAMPolicies, err := o.iam.ListPolicyNames()
+	if err != nil {
+		return fmt.Errorf("list permissions boundary policies: %w", err)
+	}
+	for _, policy := range IAMPolicies {
+		if policy == policyName {
+			return nil
+		}
+	}
+	return fmt.Errorf("IAM policy %q not found in this account", policyName)
+}
+
+func (o *initAppOpts) warnIfDomainIsNotOwned() {
+	err := o.route53.ValidateDomainOwnership(o.domainName)
 	if err == nil {
-		return nil
+		return
 	}
-	var errDomainNotFound *route53.ErrDomainNotFound
-	if errors.As(err, &errDomainNotFound) {
-		log.Warningf(`The account does not seem to own the domain that you entered.
-Please make sure that %s is registered with Route53 in your account, or that your hosted zone has the appropriate NS records.
-To transfer domain registration in Route53, see:
-https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/domain-transfer-to-route-53.html
-To update the NS records in your hosted zone, see:
-https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/SOA-NSrecords.html#NSrecords
-`, o.domainName)
-		return nil
+	var nsRecordsErr *route53.ErrUnmatchedNSRecords
+	if errors.As(err, &nsRecordsErr) {
+		o.prog.Stop("")
+		log.Warningln(nsRecordsErr.RecommendActions())
 	}
-	return fmt.Errorf("check if domain is owned by the account: %w", err)
 }
 
 func (o *initAppOpts) domainHostedZoneID(domainName string) (string, error) {
@@ -273,10 +338,13 @@ func (o *initAppOpts) askAppName(formatMsg string) error {
 	appName, err := o.prompt.Get(
 		fmt.Sprintf(formatMsg, color.Emphasize("name")),
 		appInitNameHelpPrompt,
-		validateAppName,
+		validateAppNameString,
 		prompt.WithFinalMessage("Application name:"))
 	if err != nil {
 		return fmt.Errorf("prompt get application name: %w", err)
+	}
+	if err := o.validateAppName(appName); err != nil {
+		return err
 	}
 	o.name = appName
 	return nil
@@ -299,6 +367,34 @@ func (o *initAppOpts) askSelectExistingAppName(existingApps []*config.Applicatio
 	return nil
 }
 
+type errAppAlreadyExistsInAccount struct {
+	appName string
+}
+
+type errStackSetAdminRoleExistsInAccount struct {
+	appName  string
+	roleName string
+}
+
+func (e *errAppAlreadyExistsInAccount) Error() string {
+	return fmt.Sprintf("application named %q already exists in another region", e.appName)
+}
+
+func (e *errAppAlreadyExistsInAccount) RecommendActions() string {
+	return fmt.Sprintf(`If you want to create a new workspace reusing the existing application %s, please switch to the region where you created the application, and run %s.
+If you'd like to recreate the application and all of its resources, please switch to the region where you created the application, and run %s.`, e.appName, color.HighlightCode("copilot app init"), color.HighlightCode("copilot app delete"))
+}
+
+func (e *errStackSetAdminRoleExistsInAccount) Error() string {
+	return fmt.Sprintf("IAM admin role %q already exists in this account", e.roleName)
+}
+
+func (e *errStackSetAdminRoleExistsInAccount) RecommendActions() string {
+	return fmt.Sprintf(`Copilot will create an IAM admin role named %s to manage the stack set of the application %s. 
+You have an existing role with the exact same name in your account, which will collide with the role that Copilot creates.
+Please create the application with a different name, so that the IAM role name does not collide.`, e.roleName, e.appName)
+}
+
 // buildAppInitCommand builds the command for creating a new application.
 func buildAppInitCommand() *cobra.Command {
 	vars := initAppVars{}
@@ -312,6 +408,8 @@ An application is a collection of containerized services that operate together.`
   /code $ copilot app init test
   Create a new application with an existing domain name in Amazon Route53.
   /code $ copilot app init --domain example.com
+  Create a new application with an existing IAM policy as the permissions boundary for roles.
+  /code $ copilot app init --permissions-boundary myPermissionsBoundaryPolicy
   Create a new application with resource tags.
   /code $ copilot app init --resource-tags department=MyDept,team=MyTeam`,
 		Args: reservedArgs,
@@ -327,6 +425,7 @@ An application is a collection of containerized services that operate together.`
 		}),
 	}
 	cmd.Flags().StringVar(&vars.domainName, domainNameFlag, "", domainNameFlagDescription)
+	cmd.Flags().StringVar(&vars.permissionsBoundary, permissionsBoundaryFlag, "", permissionsBoundaryFlagDescription)
 	cmd.Flags().StringToStringVar(&vars.resourceTags, resourceTagsFlag, nil, resourceTagsFlagDescription)
 	return cmd
 }

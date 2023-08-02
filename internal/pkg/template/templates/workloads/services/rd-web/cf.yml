@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a request driven web service on AWS App Runner.
-{{- if .SerializedManifest }}
 Metadata:
+  Version: {{ .Version }}
+{{- if .SerializedManifest }}
   Manifest: |
 {{indent 4 .SerializedManifest}}
 {{- end }}
@@ -82,6 +83,25 @@ Resources:
           ImageRepositoryType: !Ref ImageRepositoryType
           ImageConfiguration:
             Port: !Ref ContainerPort
+            {{- if hasSecrets .}}
+            RuntimeEnvironmentSecrets:
+            {{- range $name, $secret := .Secrets}}
+              - Name: {{$name}}
+            {{- if $secret.RequiresImport}}
+                Value:
+                  Fn::ImportValue: {{ quote $secret.ValueFrom }}
+            {{- else}}
+                Value: {{if not $secret.RequiresSub }} {{$secret.ValueFrom}} {{- else}} !Sub 'arn:${AWS::Partition}:{{$secret.Service}}:${AWS::Region}:${AWS::AccountId}:{{$secret.ValueFrom}}' {{- end}}
+            {{- end}}   
+            {{- end}}
+            {{- end}}
+            {{- if .NestedStack}}{{$stackName := .NestedStack.StackName}}
+            {{- range $secret := .NestedStack.SecretOutputs}}
+            - Name: {{toSnakeCase $secret}}
+              Value:
+                Fn::GetAtt: [{{$stackName}}, Outputs.{{$secret}}]
+            {{- end}}
+            {{- end}}
             RuntimeEnvironmentVariables:
               - Name: COPILOT_APPLICATION_NAME
                 Value: !Ref AppName
@@ -100,10 +120,7 @@ Resources:
               {{- end }}
               {{- end }}
               {{- if .Variables}}
-              {{- range $name, $value := .Variables}}
-              - Name: {{$name}}
-                Value: {{$value | printf "%q"}}
-              {{- end}}
+              {{include "variables" . | indent 14}}
               {{- end}}
               {{- if .NestedStack}}{{$stackName := .NestedStack.StackName}}
               {{- range $var := .NestedStack.VariableOutputs}}
@@ -133,17 +150,26 @@ Resources:
         HealthyThreshold: !If [HasHealthCheckHealthyThreshold, !Ref HealthCheckHealthyThreshold, !Ref AWS::NoValue]
         UnhealthyThreshold: !If [HasHealthCheckUnhealthyThreshold, !Ref HealthCheckUnhealthyThreshold, !Ref AWS::NoValue]
       {{- end }}
-      {{- if requiresVPCConnector .}}
       NetworkConfiguration:
         EgressConfiguration:
+          {{- if requiresVPCConnector .}}
           EgressType: VPC
           VpcConnectorArn: !Ref VpcConnector
-      {{- end }}
+          {{- else }}
+          EgressType: DEFAULT
+          {{- end}}
+        {{- if .Private}}
+        IngressConfiguration:
+          IsPubliclyAccessible: false
+        {{- end}}
       {{- if eq .Observability.Tracing "AWSXRAY"}}
       ObservabilityConfiguration:
         ObservabilityEnabled: true
         ObservabilityConfigurationArn: !Sub 'arn:aws:apprunner:${AWS::Region}:${AWS::AccountId}:observabilityconfiguration/DefaultConfiguration/1/00000000000000000000000000000001'
       {{- end }}
+      {{- if .Count}}   
+      AutoScalingConfigurationArn: !Sub 'arn:${AWS::Partition}:apprunner:${AWS::Region}:${AWS::AccountId}:autoscalingconfiguration/{{.Count}}'
+      {{- end}}
       Tags:
         - Key: copilot-application
           Value: !Ref AppName
@@ -153,6 +179,36 @@ Resources:
           Value: !Ref WorkloadName{{if .Tags}}{{range $name, $value := .Tags}}
         - Key: {{$name}}
           Value: {{$value}}{{end}}{{end}}
+
+  {{- if .Private}}
+  AppRunnerVpcIngressConnection:
+    Metadata:
+      'aws:copilot:description': 'The ingress connection from your environment to this service'
+    Type: AWS::AppRunner::VpcIngressConnection
+    Properties:
+      ServiceArn: !GetAtt Service.ServiceArn
+      IngressVpcConfiguration:
+        VpcId:
+          Fn::ImportValue: !Sub '${AppName}-${EnvName}-VpcId'
+        {{- if .AppRunnerVPCEndpoint}}
+        VpcEndpointId: {{.AppRunnerVPCEndpoint}}
+        {{- else}}
+        VpcEndpointId: !GetAtt EnvControllerAction.AppRunnerVpcEndpointId
+        {{- end}}
+      Tags:
+        - Key: copilot-application
+          Value: !Ref AppName
+        - Key: copilot-environment
+          Value: !Ref EnvName
+        - Key: copilot-service
+          Value: !Ref WorkloadName
+        {{- if .Tags}}
+        {{- range $name, $value := .Tags}}
+        - Key: {{$name}}
+          Value: {{$value}}
+        {{- end}}
+        {{- end}}
+  {{- end}}
 
 {{include "addons" . | indent 2}}
 {{if .Alias}}
@@ -186,7 +242,7 @@ Resources:
 
   CustomResourceRole:
     Metadata:
-      'aws:copilot:description': 'An IAM role used by custom resources to associate the custom domain'
+      'aws:copilot:description': 'An IAM role {{- if .PermissionsBoundary}} with permissions boundary {{.PermissionsBoundary}} {{- end}} used by custom resources to associate the custom domain'
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -199,6 +255,9 @@ Resources:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
+      {{- if .PermissionsBoundary}}
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/{{.PermissionsBoundary}}'
+      {{- end}}
       Path: /
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole

@@ -31,10 +31,10 @@ Configurations
 
 Routes
 
-  Environment  URL
-  -----------  ---
-  test         https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com
-  prod         https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com
+  Environment  Ingress      URL
+  -----------  -------      ---
+  test         environment  https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com
+  prod         internet     https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com
 
 Variables
 
@@ -42,6 +42,13 @@ Variables
   ----                      -----------  -----
   COPILOT_ENVIRONMENT_NAME  prod         prod
     "                       test         test
+
+Secrets
+
+  Name           Environment  Value
+  ----           -----------  -----
+  my-ssm-secret  prod         prod
+    "            test         test
 
 Resources
 
@@ -90,13 +97,38 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 			},
 			wantedError: fmt.Errorf("retrieve service configuration: some error"),
 		},
+		"return error if fail to get service url": {
+			shouldOutputResources: true,
+			setupMocks: func(m apprunnerSvcDescriberMocks) {
+				gomock.InOrder(
+					m.storeSvc.EXPECT().ListEnvironmentsDeployedTo(testApp, testSvc).Return([]string{testEnv}, nil),
+					m.ecsSvcDescriber.EXPECT().Service().Return(&apprunner.Service{}, nil),
+					m.ecsSvcDescriber.EXPECT().ServiceURL().Return("", mockErr),
+				)
+			},
+			wantedError: fmt.Errorf("retrieve service url: some error"),
+		},
+		"return error if fail to check if private": {
+			shouldOutputResources: true,
+			setupMocks: func(m apprunnerSvcDescriberMocks) {
+				gomock.InOrder(
+					m.storeSvc.EXPECT().ListEnvironmentsDeployedTo(testApp, testSvc).Return([]string{testEnv}, nil),
+					m.ecsSvcDescriber.EXPECT().Service().Return(&apprunner.Service{}, nil),
+					m.ecsSvcDescriber.EXPECT().ServiceURL().Return("", nil),
+					m.ecsSvcDescriber.EXPECT().IsPrivate().Return(false, mockErr),
+				)
+			},
+			wantedError: fmt.Errorf("check if service is private: some error"),
+		},
 		"return error if fail to retrieve service resources": {
 			shouldOutputResources: true,
 			setupMocks: func(m apprunnerSvcDescriberMocks) {
 				gomock.InOrder(
 					m.storeSvc.EXPECT().ListEnvironmentsDeployedTo(testApp, testSvc).Return([]string{testEnv}, nil),
 					m.ecsSvcDescriber.EXPECT().Service().Return(&apprunner.Service{}, nil),
-					m.ecsSvcDescriber.EXPECT().ServiceStackResources().Return(nil, mockErr),
+					m.ecsSvcDescriber.EXPECT().ServiceURL().Return("", nil),
+					m.ecsSvcDescriber.EXPECT().IsPrivate().Return(false, nil),
+					m.ecsSvcDescriber.EXPECT().StackResources().Return(nil, mockErr),
 				)
 			},
 			wantedError: fmt.Errorf("retrieve service resources: some error"),
@@ -118,8 +150,16 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 								Value: "test",
 							},
 						},
+						EnvironmentSecrets: []*apprunner.EnvironmentSecret{
+							{
+								Name:  "SOME_OTHER_SECRET",
+								Value: "arn:aws:ssm:us-east-1:111111111111:parameter/SHHHHH",
+							},
+						},
 					}, nil),
-					m.ecsSvcDescriber.EXPECT().ServiceStackResources().Return([]*stack.Resource{
+					m.ecsSvcDescriber.EXPECT().ServiceURL().Return("https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com", nil),
+					m.ecsSvcDescriber.EXPECT().IsPrivate().Return(true, nil),
+					m.ecsSvcDescriber.EXPECT().StackResources().Return([]*stack.Resource{
 						{
 							Type:       "AWS::AppRunner::Service",
 							PhysicalID: "arn:aws:apprunner:us-east-1:111111111111:service/testapp-test-testsvc",
@@ -137,8 +177,16 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 								Value: "prod",
 							},
 						},
+						EnvironmentSecrets: []*apprunner.EnvironmentSecret{
+							{
+								Name:  "my-ssm-secret",
+								Value: "arn:aws:ssm:us-east-1:111111111111:parameter/jan11ssm",
+							},
+						},
 					}, nil),
-					m.ecsSvcDescriber.EXPECT().ServiceStackResources().Return([]*stack.Resource{
+					m.ecsSvcDescriber.EXPECT().ServiceURL().Return("https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com", nil),
+					m.ecsSvcDescriber.EXPECT().IsPrivate().Return(false, nil),
+					m.ecsSvcDescriber.EXPECT().StackResources().Return([]*stack.Resource{
 						{
 							Type:       "AWS::AppRunner::Service",
 							PhysicalID: "arn:aws:apprunner:us-east-1:111111111111:service/testapp-prod-testsvc",
@@ -164,14 +212,16 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 						Port:        "80",
 					},
 				},
-				Routes: []*WebServiceRoute{
+				Routes: []*RDWSRoute{
 					{
 						Environment: "test",
 						URL:         "https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com",
+						Ingress:     rdwsIngressEnvironment,
 					},
 					{
 						Environment: "prod",
 						URL:         "https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com",
+						Ingress:     rdwsIngressInternet,
 					},
 				},
 				Variables: []*envVar{
@@ -184,6 +234,18 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 						Environment: "prod",
 						Name:        "COPILOT_ENVIRONMENT_NAME",
 						Value:       "prod",
+					},
+				},
+				Secrets: []*rdwsSecret{
+					{
+						Environment: "test",
+						Name:        "SOME_OTHER_SECRET",
+						ValueFrom:   "arn:aws:ssm:us-east-1:111111111111:parameter/SHHHHH",
+					},
+					{
+						Environment: "prod",
+						Name:        "my-ssm-secret",
+						ValueFrom:   "arn:aws:ssm:us-east-1:111111111111:parameter/jan11ssm",
 					},
 				},
 				Resources: map[string][]*stack.Resource{
@@ -220,13 +282,21 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 								Value: "test",
 							},
 						},
+						EnvironmentSecrets: []*apprunner.EnvironmentSecret{
+							{
+								Name:  "SOME_OTHER_SECRET",
+								Value: "arn:aws:ssm:us-east-1:111111111111:parameter/SHHHHH",
+							},
+						},
 						Observability: apprunner.ObservabilityConfiguration{
 							TraceConfiguration: &apprunner.TraceConfiguration{
 								Vendor: aws.String("mockVendor"),
 							},
 						},
 					}, nil),
-					m.ecsSvcDescriber.EXPECT().ServiceStackResources().Return([]*stack.Resource{
+					m.ecsSvcDescriber.EXPECT().ServiceURL().Return("https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com", nil),
+					m.ecsSvcDescriber.EXPECT().IsPrivate().Return(true, nil),
+					m.ecsSvcDescriber.EXPECT().StackResources().Return([]*stack.Resource{
 						{
 							Type:       "AWS::AppRunner::Service",
 							PhysicalID: "arn:aws:apprunner:us-east-1:111111111111:service/testapp-test-testsvc",
@@ -244,8 +314,16 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 								Value: "prod",
 							},
 						},
+						EnvironmentSecrets: []*apprunner.EnvironmentSecret{
+							{
+								Name:  "my-ssm-secret",
+								Value: "arn:aws:ssm:us-east-1:111111111111:parameter/jan11ssm",
+							},
+						},
 					}, nil),
-					m.ecsSvcDescriber.EXPECT().ServiceStackResources().Return([]*stack.Resource{
+					m.ecsSvcDescriber.EXPECT().ServiceURL().Return("https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com", nil),
+					m.ecsSvcDescriber.EXPECT().IsPrivate().Return(false, nil),
+					m.ecsSvcDescriber.EXPECT().StackResources().Return([]*stack.Resource{
 						{
 							Type:       "AWS::AppRunner::Service",
 							PhysicalID: "arn:aws:apprunner:us-east-1:111111111111:service/testapp-prod-testsvc",
@@ -271,14 +349,16 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 						Port:        "80",
 					},
 				},
-				Routes: []*WebServiceRoute{
+				Routes: []*RDWSRoute{
 					{
 						Environment: "test",
 						URL:         "https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com",
+						Ingress:     rdwsIngressEnvironment,
 					},
 					{
 						Environment: "prod",
 						URL:         "https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com",
+						Ingress:     rdwsIngressInternet,
 					},
 				},
 				Variables: []*envVar{
@@ -291,6 +371,18 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 						Environment: "prod",
 						Name:        "COPILOT_ENVIRONMENT_NAME",
 						Value:       "prod",
+					},
+				},
+				Secrets: []*rdwsSecret{
+					{
+						Environment: "test",
+						Name:        "SOME_OTHER_SECRET",
+						ValueFrom:   "arn:aws:ssm:us-east-1:111111111111:parameter/SHHHHH",
+					},
+					{
+						Environment: "prod",
+						Name:        "my-ssm-secret",
+						ValueFrom:   "arn:aws:ssm:us-east-1:111111111111:parameter/jan11ssm",
 					},
 				},
 				Observability: []observabilityInEnv{
@@ -362,7 +454,7 @@ func TestRDWebServiceDescriber_Describe(t *testing.T) {
 func TestRDWebServiceDesc_String(t *testing.T) {
 	t.Run("correct output including resources", func(t *testing.T) {
 		wantedHumanString := humanStringWithResources
-		wantedJSONString := "{\"service\":\"testsvc\",\"type\":\"Request-Driven Web Service\",\"application\":\"testapp\",\"configurations\":[{\"environment\":\"test\",\"port\":\"80\",\"cpu\":\"1024\",\"memory\":\"2048\"},{\"environment\":\"prod\",\"port\":\"80\",\"cpu\":\"2048\",\"memory\":\"3072\"}],\"routes\":[{\"environment\":\"test\",\"url\":\"https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com\"},{\"environment\":\"prod\",\"url\":\"https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com\"}],\"variables\":[{\"environment\":\"prod\",\"name\":\"COPILOT_ENVIRONMENT_NAME\",\"value\":\"prod\"},{\"environment\":\"test\",\"name\":\"COPILOT_ENVIRONMENT_NAME\",\"value\":\"test\"}],\"resources\":{\"prod\":[{\"type\":\"AWS::AppRunner::Service\",\"physicalID\":\"arn:aws:apprunner:us-east-1:111111111111:service/testapp-prod-testsvc\"}],\"test\":[{\"type\":\"AWS::AppRunner::Service\",\"physicalID\":\"arn:aws:apprunner:us-east-1:111111111111:service/testapp-test-testsvc\"}]}}\n"
+		wantedJSONString := "{\"service\":\"testsvc\",\"type\":\"Request-Driven Web Service\",\"application\":\"testapp\",\"configurations\":[{\"environment\":\"test\",\"port\":\"80\",\"cpu\":\"1024\",\"memory\":\"2048\"},{\"environment\":\"prod\",\"port\":\"80\",\"cpu\":\"2048\",\"memory\":\"3072\"}],\"routes\":[{\"environment\":\"test\",\"url\":\"https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com\",\"ingress\":\"environment\"},{\"environment\":\"prod\",\"url\":\"https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com\",\"ingress\":\"internet\"}],\"variables\":[{\"environment\":\"prod\",\"name\":\"COPILOT_ENVIRONMENT_NAME\",\"value\":\"prod\"},{\"environment\":\"test\",\"name\":\"COPILOT_ENVIRONMENT_NAME\",\"value\":\"test\"}],\"resources\":{\"prod\":[{\"type\":\"AWS::AppRunner::Service\",\"physicalID\":\"arn:aws:apprunner:us-east-1:111111111111:service/testapp-prod-testsvc\"}],\"test\":[{\"type\":\"AWS::AppRunner::Service\",\"physicalID\":\"arn:aws:apprunner:us-east-1:111111111111:service/testapp-test-testsvc\"}]},\"secrets\":[{\"environment\":\"prod\",\"name\":\"my-ssm-secret\",\"value\":\"prod\"},{\"environment\":\"test\",\"name\":\"my-ssm-secret\",\"value\":\"test\"}]}\n"
 		svcDesc := &rdWebSvcDesc{
 			Service: "testsvc",
 			Type:    "Request-Driven Web Service",
@@ -381,14 +473,16 @@ func TestRDWebServiceDesc_String(t *testing.T) {
 					Port:        "80",
 				},
 			},
-			Routes: []*WebServiceRoute{
+			Routes: []*RDWSRoute{
 				{
 					Environment: "test",
 					URL:         "https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com",
+					Ingress:     rdwsIngressEnvironment,
 				},
 				{
 					Environment: "prod",
 					URL:         "https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com",
+					Ingress:     rdwsIngressInternet,
 				},
 			},
 			Variables: []*envVar{
@@ -401,6 +495,18 @@ func TestRDWebServiceDesc_String(t *testing.T) {
 					Environment: "prod",
 					Name:        "COPILOT_ENVIRONMENT_NAME",
 					Value:       "prod",
+				},
+			},
+			Secrets: []*rdwsSecret{
+				{
+					Environment: "prod",
+					Name:        "my-ssm-secret",
+					ValueFrom:   "prod",
+				},
+				{
+					Environment: "test",
+					Name:        "my-ssm-secret",
+					ValueFrom:   "test",
 				},
 			},
 			Resources: map[string][]*stack.Resource{
@@ -449,10 +555,10 @@ Observability
 
 Routes
 
-  Environment  URL
-  -----------  ---
-  test         https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com
-  prod         https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com
+  Environment  Ingress      URL
+  -----------  -------      ---
+  test         environment  https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com
+  prod         internet     https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com
 
 Variables
 
@@ -460,6 +566,13 @@ Variables
   ----                      -----------  -----
   COPILOT_ENVIRONMENT_NAME  prod         prod
     "                       test         test
+
+Secrets
+
+  Name           Environment  Value
+  ----           -----------  -----
+  my-ssm-secret  prod         prod
+    "            test         test
 
 Resources
 
@@ -469,7 +582,7 @@ Resources
   prod
     AWS::AppRunner::Service  arn:aws:apprunner:us-east-1:111111111111:service/testapp-prod-testsvc
 `
-		wantedJSONString := "{\"service\":\"testsvc\",\"type\":\"Request-Driven Web Service\",\"application\":\"testapp\",\"configurations\":[{\"environment\":\"test\",\"port\":\"80\",\"cpu\":\"1024\",\"memory\":\"2048\"},{\"environment\":\"prod\",\"port\":\"80\",\"cpu\":\"2048\",\"memory\":\"3072\"}],\"routes\":[{\"environment\":\"test\",\"url\":\"https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com\"},{\"environment\":\"prod\",\"url\":\"https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com\"}],\"variables\":[{\"environment\":\"prod\",\"name\":\"COPILOT_ENVIRONMENT_NAME\",\"value\":\"prod\"},{\"environment\":\"test\",\"name\":\"COPILOT_ENVIRONMENT_NAME\",\"value\":\"test\"}],\"resources\":{\"prod\":[{\"type\":\"AWS::AppRunner::Service\",\"physicalID\":\"arn:aws:apprunner:us-east-1:111111111111:service/testapp-prod-testsvc\"}],\"test\":[{\"type\":\"AWS::AppRunner::Service\",\"physicalID\":\"arn:aws:apprunner:us-east-1:111111111111:service/testapp-test-testsvc\"}]},\"observability\":[{\"environment\":\"test\",\"tracing\":{\"vendor\":\"mockVendor\"}},{\"environment\":\"prod\"}]}\n"
+		wantedJSONString := "{\"service\":\"testsvc\",\"type\":\"Request-Driven Web Service\",\"application\":\"testapp\",\"configurations\":[{\"environment\":\"test\",\"port\":\"80\",\"cpu\":\"1024\",\"memory\":\"2048\"},{\"environment\":\"prod\",\"port\":\"80\",\"cpu\":\"2048\",\"memory\":\"3072\"}],\"routes\":[{\"environment\":\"test\",\"url\":\"https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com\",\"ingress\":\"environment\"},{\"environment\":\"prod\",\"url\":\"https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com\",\"ingress\":\"internet\"}],\"variables\":[{\"environment\":\"prod\",\"name\":\"COPILOT_ENVIRONMENT_NAME\",\"value\":\"prod\"},{\"environment\":\"test\",\"name\":\"COPILOT_ENVIRONMENT_NAME\",\"value\":\"test\"}],\"resources\":{\"prod\":[{\"type\":\"AWS::AppRunner::Service\",\"physicalID\":\"arn:aws:apprunner:us-east-1:111111111111:service/testapp-prod-testsvc\"}],\"test\":[{\"type\":\"AWS::AppRunner::Service\",\"physicalID\":\"arn:aws:apprunner:us-east-1:111111111111:service/testapp-test-testsvc\"}]},\"observability\":[{\"environment\":\"test\",\"tracing\":{\"vendor\":\"mockVendor\"}},{\"environment\":\"prod\"}],\"secrets\":[{\"environment\":\"prod\",\"name\":\"my-ssm-secret\",\"value\":\"prod\"},{\"environment\":\"test\",\"name\":\"my-ssm-secret\",\"value\":\"test\"}]}\n"
 		svcDesc := &rdWebSvcDesc{
 			Service: "testsvc",
 			Type:    "Request-Driven Web Service",
@@ -488,14 +601,16 @@ Resources
 					Port:        "80",
 				},
 			},
-			Routes: []*WebServiceRoute{
+			Routes: []*RDWSRoute{
 				{
 					Environment: "test",
 					URL:         "https://6znxd4ra33.public.us-east-1.apprunner.amazonaws.com",
+					Ingress:     rdwsIngressEnvironment,
 				},
 				{
 					Environment: "prod",
 					URL:         "https://tumkjmvjjf.public.us-east-1.apprunner.amazonaws.com",
+					Ingress:     rdwsIngressInternet,
 				},
 			},
 			Variables: []*envVar{
@@ -508,6 +623,18 @@ Resources
 					Environment: "prod",
 					Name:        "COPILOT_ENVIRONMENT_NAME",
 					Value:       "prod",
+				},
+			},
+			Secrets: []*rdwsSecret{
+				{
+					Environment: "prod",
+					Name:        "my-ssm-secret",
+					ValueFrom:   "prod",
+				},
+				{
+					Environment: "test",
+					Name:        "my-ssm-secret",
+					ValueFrom:   "test",
 				},
 			},
 			Observability: []observabilityInEnv{

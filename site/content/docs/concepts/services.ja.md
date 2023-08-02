@@ -4,7 +4,7 @@
 
 Service を作成して AWS 上でコンテナを実行するための方法は複数あります。もっとも簡単な方法は、Dockerfile が置かれたディレクトリで `init` コマンドを実行することです。
 
-```bash
+```console
 $ copilot init
 ```
 
@@ -20,19 +20,22 @@ Service のタイプを選択すると、Copilot は Dockerfile 内で記述さ�
 
 ### インターネットから接続可能な Service
 
-インターネットからアクセス可能な Service を作る際の選択肢には次の２つがあります。
+インターネットからアクセス可能な Service を作る際の選択肢には次の 3 つがあります。
 
 * "Request-Driven Web Service" - Service 実行環境として AWS App Runner サービスを作成します。
+* "Static Site" - 静的 Web サイト用に専用の CloudFront ディストリビューションと S3 バケットをプロビジョニングします。
 * "Load Balanced Web Service" - Service 実行環境として Appplication Load Balancer (ALB)、Network Load Balancer、またはその両方を作成し、セキュリティグループ、ECS サービス (Fargate) を利用します。
 
 #### Request-Driven Web Service
-
 AWS App Runner を利用する Service で、受け付けるトラフィックに応じてオートスケールし、トラフィックがない場合は設定された最低インスタンス数までスケールダウンします。リクエスト量の大きな変化や恒常的な少ないリクエスト量が見込まれる HTTP サービスにとってもよりコスト効率の高い選択肢です。
+
 ECS とは異なり、 App Runner サービスはデフォルトでは VPC とは接続されていません。 Egress トラフィックを VPC 経由でルーティングするには、
 Manifest 内の[`network`](../manifest/rd-web-service.ja.md#network)フィールドを設定します。
 
-#### Load Balanced Web Service
+#### Static Site
+Amazon CloudFront で配信され、S3 でホスティングされた静的 Web サイトです。[CloudFront コンテンツ配信ネットワーク (CDN)](../developing/content-delivery.ja.md) を使用したキャッシングにより、コストと速度を最適化します。Copilot は、静的 Web サイトホスティング用に構成された新しい S3 バケットに静的アセットをアップロードします。
 
+#### Load Balanced Web Service
 Application Load Balancer、Network Load Balancer、または両方をトラフィックの入り口として Fargate 上でタスクを実行する ECS サービスです。
 安定したリクエスト量が見込まれる場合、Service から VPC 内のリソースにアクセスする必要がある場合、あるいはより高度な設定の必要がある場合に適した HTTP または TCP サービスの選択肢です。
 
@@ -65,7 +68,7 @@ Worker Service は次の要素で構成されます。
 
 ## Manifest と設定
 <!-- textlint-disable ja-technical-writing/ja-no-weak-phrase -->
-`copilot init` コマンドを実行すると、Copilot が `manifest.yml` という名前のファイルを copilot ディレクトリ内に作成していることに気づいたかもしれません。この Manifest ファイルは Service 用の共通設定やオプションを持ちます。どのようなオプションがあるかはあなたが選択した Service のタイプによって異なりますが、共通の設定には例えば Service に割り当てるメモリや CPU のリソース量、ヘルスチェック、環境変数といったものが含まれます。
+`copilot init` コマンドを実行すると、Copilot が `manifest.yml` という名前のファイルを `copilot/[service name]/` ディレクトリ内に作成していることに気づいたかもしれません。この Manifest ファイルは Service 用の共通設定やオプションを持ちます。どのようなオプションがあるかはあなたが選択した Service のタイプによって異なりますが、共通の設定には例えば Service に割り当てるメモリや CPU のリソース量、ヘルスチェック、環境変数といったものが含まれます。
 <!-- textlint-enable ja-technical-writing/ja-no-weak-phrase -->
 
 _front-end_ という名前の Load Balanced Web Service 用に作られた Manifest ファイルを覗いてみましょう。
@@ -113,7 +116,7 @@ Manifest ファイルの仕様について学ぶには、[Manifest](../manifest/
 
 Service をセットアップしたら、あるいは Manifest ファイルに変更を加えたら、deploy コマンドを実行して Service をデプロイできます。
 
-```bash
+```console
 $ copilot deploy
 ```
 
@@ -135,7 +138,7 @@ Service のセットアップと実行が完了したので、Copilot を使っ�
 
 `copilot svc show` コマンドを実行すると、Service のサマリ情報を表示します。以下は Load Balanced Web Application での出力の例です。各 Environment ごとの Service 設定や Service のエンドポイント、あるいは環境変数などが確認できます。さらに、`--resources` フラグを利用することでこの Service に紐づけられたすべての AWS リソースを確認できます。
 
-```bash
+```console
 $ copilot svc show
 About
 
@@ -173,7 +176,7 @@ Variables
 Service のすべてのタスクは Healthy だろうか？なにかアラームが発火していないか？など、Service のステータスを確認できると便利です。Copilot では、`copilot svc status` でそのような情報のサマリを確認できます。
 
 
-```bash
+```console
 $ copilot svc status
 Service Status
 
@@ -199,7 +202,7 @@ Alarms
 
 Service のログの確認も簡単です。`copilot svc logs` コマンドを実行すると、直近の Service ログを確認できます。`--follow` フラグをあわせて利用すると、Service 側のログの出力をライブに追いかけることもできます。
 
-```bash
+```console
 $ copilot svc logs
 37236ed 10.0.0.30 🚑 Health-check ok!
 37236ed 10.0.0.30 🚑 Health-check ok!

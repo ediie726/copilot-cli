@@ -7,16 +7,18 @@ package ecs
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/arn"
-	"github.com/aws/copilot-cli/internal/pkg/aws/stepfunctions"
-
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/copilot-cli/internal/pkg/aws/ecs"
 	"github.com/aws/copilot-cli/internal/pkg/aws/resourcegroups"
+	"github.com/aws/copilot-cli/internal/pkg/aws/secretsmanager"
+	"github.com/aws/copilot-cli/internal/pkg/aws/ssm"
+	"github.com/aws/copilot-cli/internal/pkg/aws/stepfunctions"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
 )
 
@@ -45,10 +47,22 @@ type ecsClient interface {
 	TaskDefinition(taskDefName string) (*ecs.TaskDefinition, error)
 	UpdateService(clusterName, serviceName string, opts ...ecs.UpdateServiceOpts) error
 	DescribeTasks(cluster string, taskARNs []string) ([]*ecs.Task, error)
+	ActiveClusters(arns ...string) ([]string, error)
+	ActiveServices(serviceARNs ...string) ([]string, error)
 }
 
 type stepFunctionsClient interface {
 	StateMachineDefinition(stateMachineARN string) (string, error)
+}
+
+type secretGetter interface {
+	GetSecretValue(secretName string) (string, error)
+}
+
+// EnvVar contains the value of an environment variable
+type EnvVar struct {
+	Name  string
+	Value string
 }
 
 // ServiceDesc contains the description of an ECS service.
@@ -62,6 +76,8 @@ type ServiceDesc struct {
 // Client retrieves Copilot information from ECS endpoint.
 type Client struct {
 	rgGetter       resourceGetter
+	ssm            secretGetter
+	secretManager  secretGetter
 	ecsClient      ecsClient
 	StepFuncClient stepFunctionsClient
 }
@@ -71,6 +87,8 @@ func New(sess *session.Session) *Client {
 	return &Client{
 		rgGetter:       resourcegroups.New(sess),
 		ecsClient:      ecs.New(sess),
+		ssm:            ssm.New(sess),
+		secretManager:  secretsmanager.New(sess),
 		StepFuncClient: stepfunctions.New(sess),
 	}
 }
@@ -112,17 +130,26 @@ func (c Client) DescribeService(app, env, svc string) (*ServiceDesc, error) {
 	}, nil
 }
 
+// Service returns an ECS service given Copilot service info.
+func (c Client) Service(app, env, svc string) (*ecs.Service, error) {
+	clusterName, serviceName, err := c.fetchAndParseServiceARN(app, env, svc)
+	if err != nil {
+		return nil, err
+	}
+	service, err := c.ecsClient.Service(clusterName, serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("get ECS service %s: %w", serviceName, err)
+	}
+	return service, nil
+}
+
 // LastUpdatedAt returns the last updated time of the ECS service.
 func (c Client) LastUpdatedAt(app, env, svc string) (time.Time, error) {
-	clusterName, serviceName, err := c.fetchAndParseServiceARN(app, env, svc)
+	detail, err := c.Service(app, env, svc)
 	if err != nil {
 		return time.Time{}, err
 	}
-	detail, err := c.ecsClient.Service(clusterName, serviceName)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("get ECS service %s: %w", serviceName, err)
-	}
-	return aws.TimeValue(detail.Deployments[0].UpdatedAt), nil
+	return detail.LastUpdatedAt(), nil
 }
 
 // ListActiveAppEnvTasksOpts contains the parameters for ListActiveAppEnvTasks.
@@ -221,6 +248,48 @@ func (c Client) StopDefaultClusterTasks(familyName string) error {
 	return c.ecsClient.StopTasks(taskIDs, ecs.WithStopTaskReason(taskStopReason))
 }
 
+func secretNameSpace(secret string) (string, error) {
+	// A secret value can be a SSM Parameter Name/ SSM Parameter ARN/ Secrets Manager ARN
+	// Note: If there is an error while parsing the secret value, this functions assumes it to be SSM Parameter.
+	// Refer to https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_Secret.html
+	parsed, err := arn.Parse(secret)
+	if err != nil {
+		return ssm.Namespace, nil
+	}
+	switch parsed.Service {
+	case ssm.Namespace, secretsmanager.Namespace:
+		return parsed.Service, nil
+	default:
+		return "", fmt.Errorf("invalid ARN: not an SSM or Secrets Manager ARN")
+	}
+}
+
+// DecryptedSecrets returns the decrypted parameters from either SSM parameter store or Secrets Manager.
+func (c Client) DecryptedSecrets(secrets []*ecs.ContainerSecret) ([]EnvVar, error) {
+	var vars []EnvVar
+	for _, secret := range secrets {
+		namespace, err := secretNameSpace(secret.ValueFrom)
+		if err != nil {
+			return nil, err
+		}
+		var secretValue string
+		switch namespace {
+		case ssm.Namespace:
+			secretValue, err = c.ssm.GetSecretValue(secret.ValueFrom)
+		case secretsmanager.Namespace:
+			secretValue, err = c.secretManager.GetSecretValue(secret.ValueFrom)
+		}
+		if err != nil {
+			return nil, err
+		}
+		vars = append(vars, EnvVar{
+			Name:  secret.Name,
+			Value: secretValue,
+		})
+	}
+	return vars, nil
+}
+
 // TaskDefinition returns the task definition of the service.
 func (c Client) TaskDefinition(app, env, svc string) (*ecs.TaskDefinition, error) {
 	taskDefName := fmt.Sprintf("%s-%s-%s", app, env, svc)
@@ -237,18 +306,11 @@ func (c Client) NetworkConfiguration(app, env, svc string) (*ecs.NetworkConfigur
 	if err != nil {
 		return nil, err
 	}
-
 	arn, err := c.serviceARN(app, env, svc)
 	if err != nil {
 		return nil, err
 	}
-
-	svcName, err := arn.ServiceName()
-	if err != nil {
-		return nil, fmt.Errorf("extract service name from arn %s: %w", *arn, err)
-	}
-
-	return c.ecsClient.NetworkConfiguration(clusterARN, svcName)
+	return c.ecsClient.NetworkConfiguration(clusterARN, arn.ServiceName())
 }
 
 // NetworkConfigurationForJob returns the network configuration of the job.
@@ -277,6 +339,7 @@ type NetworkConfiguration ecs.NetworkConfiguration
 
 // UnmarshalJSON implements custom logic to unmarshal only the network configuration from a state machine definition.
 // Example state machine definition:
+//
 //	 "Version": "1.0",
 //	 "Comment": "Run AWS Fargate task",
 //	 "StartAt": "Run Fargate Task",
@@ -379,24 +442,33 @@ func filterCopilotTasks(tasks []*ecs.Task, taskID string) []*ecs.Task {
 }
 
 func (c Client) clusterARN(app, env string) (string, error) {
-	clusters, err := c.rgGetter.GetResourcesByTags(clusterResourceType, map[string]string{
+	tags := tags(map[string]string{
 		deploy.AppTagKey: app,
 		deploy.EnvTagKey: env,
 	})
 
-	if err != nil {
-		return "", fmt.Errorf("get cluster resources for environment %s: %w", env, err)
+	clusters, err := c.rgGetter.GetResourcesByTags(clusterResourceType, tags)
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("get ECS cluster with tags %s: %w", tags.String(), err)
+	case len(clusters) == 0:
+		return "", fmt.Errorf("no ECS cluster found with tags %s", tags.String())
 	}
 
-	if len(clusters) == 0 {
-		return "", fmt.Errorf("no cluster found in environment %s", env)
+	arns := make([]string, len(clusters))
+	for i := range clusters {
+		arns[i] = clusters[i].ARN
 	}
 
-	// NOTE: only one cluster is associated with an application and an environment.
-	if len(clusters) > 1 {
-		return "", fmt.Errorf("more than one cluster is found in environment %s", env)
+	active, err := c.ecsClient.ActiveClusters(arns...)
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("check if clusters are active: %w", err)
+	case len(active) > 1:
+		return "", fmt.Errorf("more than one active ECS cluster are found with tags %s", tags.String())
 	}
-	return clusters[0].ARN, nil
+
+	return active[0], nil
 }
 
 func (c Client) fetchAndParseServiceARN(app, env, svc string) (cluster, service string, err error) {
@@ -404,44 +476,62 @@ func (c Client) fetchAndParseServiceARN(app, env, svc string) (cluster, service 
 	if err != nil {
 		return "", "", err
 	}
-	clusterName, err := svcARN.ClusterName()
-	if err != nil {
-		return "", "", fmt.Errorf("get cluster name: %w", err)
-	}
-	serviceName, err := svcARN.ServiceName()
-	if err != nil {
-		return "", "", fmt.Errorf("get service name: %w", err)
-	}
-	return clusterName, serviceName, nil
+	return svcARN.ClusterName(), svcARN.ServiceName(), nil
 }
 
 func (c Client) serviceARN(app, env, svc string) (*ecs.ServiceArn, error) {
-	services, err := c.rgGetter.GetResourcesByTags(serviceResourceType, map[string]string{
+	tags := tags(map[string]string{
 		deploy.AppTagKey:     app,
 		deploy.EnvTagKey:     env,
 		deploy.ServiceTagKey: svc,
 	})
+	services, err := c.rgGetter.GetResourcesByTags(serviceResourceType, tags)
 	if err != nil {
-		return nil, fmt.Errorf("get ECS service with tags (%s, %s, %s): %w", app, env, svc, err)
+		return nil, fmt.Errorf("get ECS service with tags %s: %w", tags.String(), err)
 	}
 	if len(services) == 0 {
-		return nil, fmt.Errorf("no ECS service found for %s in environment %s", svc, env)
+		return nil, fmt.Errorf("no ECS service found with tags %s", tags.String())
 	}
-	if len(services) > 1 {
-		return nil, fmt.Errorf("more than one ECS service with the name %s found in environment %s", svc, env)
+	arns := make([]string, len(services))
+	for i := range services {
+		arns[i] = services[i].ARN
 	}
-	serviceArn := ecs.ServiceArn(services[0].ARN)
-	return &serviceArn, nil
+	active, err := c.ecsClient.ActiveServices(arns...)
+	if err != nil {
+		return nil, fmt.Errorf("check if services are active: %w", err)
+	}
+	if len(active) > 1 {
+		return nil, fmt.Errorf("more than one ECS service with tags %s", tags.String())
+	}
+	serviceARN, err := ecs.ParseServiceArn(active[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse service arn: %w", err)
+	}
+	return serviceARN, nil
+}
+
+type tags map[string]string
+
+func (tags tags) String() string {
+	serialized := make([]string, len(tags))
+	var i = 0
+	for k, v := range tags {
+		serialized[i] = fmt.Sprintf("%q=%q", k, v)
+		i += 1
+	}
+	sort.SliceStable(serialized, func(i, j int) bool { return serialized[i] < serialized[j] })
+	return strings.Join(serialized, ",")
 }
 
 func (c Client) stateMachineARN(app, env, job string) (string, error) {
-	resources, err := c.rgGetter.GetResourcesByTags(resourcegroups.ResourceTypeStateMachine, map[string]string{
+	tags := tags(map[string]string{
 		deploy.AppTagKey:     app,
 		deploy.EnvTagKey:     env,
 		deploy.ServiceTagKey: job,
 	})
+	resources, err := c.rgGetter.GetResourcesByTags(resourcegroups.ResourceTypeStateMachine, tags)
 	if err != nil {
-		return "", fmt.Errorf("get state machine resource by tags for job %s: %w", job, err)
+		return "", fmt.Errorf("get state machine resource with tags %s: %w", tags.String(), err)
 	}
 
 	var stateMachineARN string

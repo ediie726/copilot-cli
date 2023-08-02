@@ -7,7 +7,7 @@ Parameters:
     Description: The environment name your service, job, or workflow is being deployed to.
   Name:
     Type: String
-    Description: The name of the service, job, or workflow being deployed.
+    Description: Your workload's name.
   # Customize your Aurora Serverless cluster by setting the default value of the following parameters.
   {{logicalIDSafe .ClusterName}}DBName:
     Type: String
@@ -78,6 +78,9 @@ Resources:
       VpcId:
         Fn::ImportValue:
           !Sub '${App}-${Env}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Sub 'copilot-${App}-${Env}-${Name}-Aurora'
   {{logicalIDSafe .ClusterName}}AuroraSecret:
     Metadata:
       'aws:copilot:description': 'A Secrets Manager secret to store your DB credentials'
@@ -134,7 +137,7 @@ Resources:
       EngineVersion: '5.7.mysql_aurora.2.07.1'
       {{- else}}
       Engine: 'aurora-postgresql'
-      EngineVersion: '10.12'
+      EngineVersion: '13.9' # LTS versions of PostgreSQL for Aurora Serverless v1 are v13.9 and v11.9
       {{- end}}
       EngineMode: serverless
       DBClusterParameterGroupName: {{- if .ParameterGroup}} {{.ParameterGroup}} {{- else}} !Ref {{logicalIDSafe .ClusterName}}DBClusterParameterGroup {{- end}}

@@ -1,7 +1,7 @@
 {{- if or .CDNConfig.ImportedCertificate .DelegateDNS}}
 UniqueJSONValuesFunctionRole:
   Metadata:
-    'aws:copilot:description': 'An IAM Role for the unique json values lambda'
+    'aws:copilot:description': 'An IAM Role {{- if .PermissionsBoundary}} with permissions boundary {{.PermissionsBoundary}} {{- end}} for the unique json values lambda'
   Type: AWS::IAM::Role
   Condition: CreateALB
   Properties:
@@ -15,6 +15,9 @@ UniqueJSONValuesFunctionRole:
           Action:
             - sts:AssumeRole
     Path: /
+    {{- if .PermissionsBoundary}}
+    PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/{{.PermissionsBoundary}}'
+    {{- end}}
     ManagedPolicyArns:
       - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
@@ -41,8 +44,25 @@ UniqueAliasesAction:
   Properties:
     ServiceToken: !GetAtt UniqueJSONValuesFunction.Arn
     Aliases: !Ref Aliases
+    {{- if .CDNConfig.Static}}
+    AdditionalStrings: [{{.CDNConfig.Static.Alias}}]
+    {{- end}}
+    FilterFor: !Ref ALBWorkloads
 {{- end}}{{/* endif or .CDNConfig.ImportedCertificate .DelegateDNS */}}
 
+{{- if .CDNConfig.Static}}
+CloudFrontOriginAccessControl:
+  Metadata:
+    'aws:copilot:description': 'Access control to make the content in the S3 bucket only accessible through CloudFront'
+  Type: AWS::CloudFront::OriginAccessControl
+  Properties: 
+    OriginAccessControlConfig: 
+        Description: Access control for static s3 origin
+        Name: !Sub 'copilot-${AppName}-${EnvironmentName}-origin-access-control'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+{{- end}}
 CloudFrontDistribution:
   Metadata:
     'aws:copilot:description': 'A CloudFront distribution for global content delivery'
@@ -58,14 +78,39 @@ CloudFrontDistribution:
         CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # See https://go.aws/3bJid3k
         TargetOriginId: !Sub 'copilot-${AppName}-${EnvironmentName}-origin'
         OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # See https://go.aws/3BIE8CP
+        {{- if .CDNConfig.TerminateTLS}}
+        ViewerProtocolPolicy: redirect-to-https
+        {{- else}}
         ViewerProtocolPolicy: allow-all
+        {{- end}}
       Enabled: true
       IPV6Enabled: true
       Origins:
-        - CustomOriginConfig:
-            OriginProtocolPolicy: match-viewer
+        - Id: !Sub 'copilot-${AppName}-${EnvironmentName}-origin'
           DomainName: !GetAtt PublicLoadBalancer.DNSName
-          Id: !Sub 'copilot-${AppName}-${EnvironmentName}-origin'
+          CustomOriginConfig:
+            {{- if .CDNConfig.TerminateTLS}}
+            OriginProtocolPolicy: http-only
+            {{- else}}
+            OriginProtocolPolicy: match-viewer
+            {{- end}}
+      {{- if .CDNConfig.Static}}
+        - Id: !Sub 'copilot-${AppName}-${EnvironmentName}-s3'
+        {{- if .CDNConfig.Static.ImportedBucket}}
+          DomainName: {{.CDNConfig.Static.ImportedBucket}}
+        {{- end}}
+          OriginAccessControlId: !Ref CloudFrontOriginAccessControl
+          # Workaround for using Origin Access Control as Origin Access Identity is still 
+          # required when the origin is an S3 bucket.
+          S3OriginConfig:
+            OriginAccessIdentity: '' 
+      CacheBehaviors:
+        - AllowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "PATCH", "POST", "DELETE"]
+          ViewerProtocolPolicy: allow-all
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # See https://go.aws/3bJid3k
+          TargetOriginId: !Sub 'copilot-${AppName}-${EnvironmentName}-s3'
+          PathPattern: '{{.CDNConfig.Static.Path}}'
+      {{- end}}
 {{- if .CDNConfig.ImportedCertificate}}
       ViewerCertificate:
         AcmCertificateArn: {{.CDNConfig.ImportedCertificate}}

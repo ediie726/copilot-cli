@@ -1,10 +1,13 @@
 TaskRole:
   Metadata:
-    'aws:copilot:description': 'An IAM role to control permissions for the containers in your tasks'
+    'aws:copilot:description': 'An IAM role {{- if .PermissionsBoundary}} with permissions boundary {{.PermissionsBoundary}} {{- end}} to control permissions for the containers in your tasks'
   Type: AWS::IAM::Role
   Properties:{{if .NestedStack}}{{$stackName := .NestedStack.StackName}}{{if gt (len .NestedStack.PolicyOutputs) 0}}
     ManagedPolicyArns:{{range $managedPolicy := .NestedStack.PolicyOutputs}}
       - Fn::GetAtt: [{{$stackName}}, Outputs.{{$managedPolicy}}]{{end}}{{end}}{{end}}
+    {{- if .PermissionsBoundary}}
+    PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/{{.PermissionsBoundary}}'
+    {{- end}}
     AssumeRolePolicyDocument:
       Version: '2012-10-17'
       Statement:

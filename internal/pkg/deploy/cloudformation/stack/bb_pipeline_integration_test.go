@@ -6,18 +6,16 @@
 package stack_test
 
 import (
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/aws/copilot-cli/internal/pkg/config"
-
+	"github.com/aws/copilot-cli/internal/pkg/deploy"
+	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
-
-	"github.com/aws/copilot-cli/internal/pkg/deploy"
-	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 )
 
 // TestBB_Pipeline_Template ensures that the CloudFormation template generated for a pipeline matches our pre-defined template.
@@ -55,6 +53,7 @@ func TestBB_Pipeline_Template(t *testing.T) {
 			},
 		},
 		AdditionalTags: nil,
+		Version:        "v1.28.0",
 	})
 
 	actual, err := ps.Template()
@@ -63,7 +62,7 @@ func TestBB_Pipeline_Template(t *testing.T) {
 	m1 := make(map[interface{}]interface{})
 	require.NoError(t, yaml.Unmarshal(actualInBytes, m1))
 
-	wanted, err := ioutil.ReadFile(filepath.Join("testdata", "pipeline", "bb_template.yaml"))
+	wanted, err := os.ReadFile(filepath.Join("testdata", "pipeline", "bb_template.yaml"))
 	require.NoError(t, err, "should be able to read expected template file")
 	wantedInBytes := []byte(wanted)
 	m2 := make(map[interface{}]interface{})

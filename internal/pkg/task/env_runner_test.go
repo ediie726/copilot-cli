@@ -48,10 +48,10 @@ func TestEnvRunner_Run(t *testing.T) {
 	mockStarterNotRun := func(m *mocks.MockRunner) {
 		m.EXPECT().RunTask(gomock.Any()).Times(0)
 	}
-	mockEnvironmentDescriberAny := func(m *mocks.MockEnvironmentDescriber) {
+	mockEnvironmentDescriberAny := func(m *mocks.MockenvironmentDescriber) {
 		m.EXPECT().Describe().AnyTimes()
 	}
-	mockEnvironmentDescriberValid := func(m *mocks.MockEnvironmentDescriber) {
+	mockEnvironmentDescriberValid := func(m *mocks.MockenvironmentDescriber) {
 		m.EXPECT().Describe().Return(&describe.EnvDescription{
 			EnvironmentVPC: describe.EnvironmentVPC{
 				ID:               "vpc-012abcd345",
@@ -89,7 +89,7 @@ func TestEnvRunner_Run(t *testing.T) {
 		MockVPCGetter            func(m *mocks.MockVPCGetter)
 		MockClusterGetter        func(m *mocks.MockClusterGetter)
 		mockStarter              func(m *mocks.MockRunner)
-		mockEnvironmentDescriber func(m *mocks.MockEnvironmentDescriber)
+		mockEnvironmentDescriber func(m *mocks.MockenvironmentDescriber)
 
 		wantedError error
 		wantedTasks []*Task
@@ -109,7 +109,7 @@ func TestEnvRunner_Run(t *testing.T) {
 				m.EXPECT().SecurityGroups(gomock.Any()).AnyTimes()
 			},
 			mockStarter: mockStarterNotRun,
-			mockEnvironmentDescriber: func(m *mocks.MockEnvironmentDescriber) {
+			mockEnvironmentDescriber: func(m *mocks.MockenvironmentDescriber) {
 				m.EXPECT().Describe().Return(nil, errors.New("error getting env description"))
 			},
 			wantedError: fmt.Errorf(fmtErrDescribeEnvironment, inEnv, errors.New("error getting env description")),
@@ -120,7 +120,7 @@ func TestEnvRunner_Run(t *testing.T) {
 				m.EXPECT().SecurityGroups(gomock.Any()).AnyTimes()
 			},
 			mockStarter: mockStarterNotRun,
-			mockEnvironmentDescriber: func(m *mocks.MockEnvironmentDescriber) {
+			mockEnvironmentDescriber: func(m *mocks.MockenvironmentDescriber) {
 				m.EXPECT().Describe().Return(&describe.EnvDescription{
 					EnvironmentVPC: describe.EnvironmentVPC{
 						ID:               "vpc-012abcd345",
@@ -235,10 +235,100 @@ func TestEnvRunner_Run(t *testing.T) {
 				},
 			},
 		},
-		"run in env with windows os success": {
+		"run in env with windows os success 2019 core": {
+			count:     1,
+			groupName: "my-task",
+			os:        "WINDOWS_SERVER_2019_CORE",
+			arch:      "X86_64",
+
+			MockClusterGetter: mockClusterGetter,
+			MockVPCGetter: func(m *mocks.MockVPCGetter) {
+				m.EXPECT().SecurityGroups(filtersForSecurityGroup).Return([]string{"sg-1", "sg-2"}, nil)
+			},
+			mockStarter: func(m *mocks.MockRunner) {
+				m.EXPECT().RunTask(ecs.RunTaskInput{
+					Cluster:         "cluster-1",
+					Count:           1,
+					Subnets:         []string{"subnet-0789ab", "subnet-0123cd"},
+					SecurityGroups:  []string{"sg-1", "sg-2"},
+					TaskFamilyName:  taskFamilyName("my-task"),
+					StartedBy:       startedBy,
+					PlatformVersion: "1.0.0",
+					EnableExec:      true,
+				}).Return([]*ecs.Task{&taskWithENI}, nil)
+			},
+			mockEnvironmentDescriber: mockEnvironmentDescriberValid,
+			wantedTasks: []*Task{
+				{
+					TaskARN: "task-1",
+					ENI:     "eni-1",
+				},
+			},
+		},
+		"run in env with windows os success 2019 full": {
 			count:     1,
 			groupName: "my-task",
 			os:        "WINDOWS_SERVER_2019_FULL",
+			arch:      "X86_64",
+
+			MockClusterGetter: mockClusterGetter,
+			MockVPCGetter: func(m *mocks.MockVPCGetter) {
+				m.EXPECT().SecurityGroups(filtersForSecurityGroup).Return([]string{"sg-1", "sg-2"}, nil)
+			},
+			mockStarter: func(m *mocks.MockRunner) {
+				m.EXPECT().RunTask(ecs.RunTaskInput{
+					Cluster:         "cluster-1",
+					Count:           1,
+					Subnets:         []string{"subnet-0789ab", "subnet-0123cd"},
+					SecurityGroups:  []string{"sg-1", "sg-2"},
+					TaskFamilyName:  taskFamilyName("my-task"),
+					StartedBy:       startedBy,
+					PlatformVersion: "1.0.0",
+					EnableExec:      true,
+				}).Return([]*ecs.Task{&taskWithENI}, nil)
+			},
+			mockEnvironmentDescriber: mockEnvironmentDescriberValid,
+			wantedTasks: []*Task{
+				{
+					TaskARN: "task-1",
+					ENI:     "eni-1",
+				},
+			},
+		},
+		"run in env with windows os success 2022 core": {
+			count:     1,
+			groupName: "my-task",
+			os:        "WINDOWS_SERVER_2022_CORE",
+			arch:      "X86_64",
+
+			MockClusterGetter: mockClusterGetter,
+			MockVPCGetter: func(m *mocks.MockVPCGetter) {
+				m.EXPECT().SecurityGroups(filtersForSecurityGroup).Return([]string{"sg-1", "sg-2"}, nil)
+			},
+			mockStarter: func(m *mocks.MockRunner) {
+				m.EXPECT().RunTask(ecs.RunTaskInput{
+					Cluster:         "cluster-1",
+					Count:           1,
+					Subnets:         []string{"subnet-0789ab", "subnet-0123cd"},
+					SecurityGroups:  []string{"sg-1", "sg-2"},
+					TaskFamilyName:  taskFamilyName("my-task"),
+					StartedBy:       startedBy,
+					PlatformVersion: "1.0.0",
+					EnableExec:      true,
+				}).Return([]*ecs.Task{&taskWithENI}, nil)
+			},
+			mockEnvironmentDescriber: mockEnvironmentDescriberValid,
+			wantedTasks: []*Task{
+				{
+					TaskARN: "task-1",
+					ENI:     "eni-1",
+				},
+			},
+		},
+		"run in env with windows os success 2022 full": {
+			count:     1,
+			groupName: "my-task",
+			os:        "WINDOWS_SERVER_2022_FULL",
 			arch:      "X86_64",
 
 			MockClusterGetter: mockClusterGetter,
@@ -312,7 +402,7 @@ func TestEnvRunner_Run(t *testing.T) {
 			MockVPCGetter := mocks.NewMockVPCGetter(ctrl)
 			MockClusterGetter := mocks.NewMockClusterGetter(ctrl)
 			mockStarter := mocks.NewMockRunner(ctrl)
-			mockEnvironmentDescriber := mocks.NewMockEnvironmentDescriber(ctrl)
+			mockEnvironmentDescriber := mocks.NewMockenvironmentDescriber(ctrl)
 
 			tc.MockVPCGetter(MockVPCGetter)
 			tc.MockClusterGetter(MockClusterGetter)

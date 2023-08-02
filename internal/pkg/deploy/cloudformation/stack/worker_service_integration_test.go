@@ -6,21 +6,22 @@
 package stack_test
 
 import (
-	"io/ioutil"
+	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/copilot-cli/internal/pkg/addon"
+	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/workspace"
-
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -31,7 +32,7 @@ const (
 
 func TestWorkerService_Template(t *testing.T) {
 	path := filepath.Join("testdata", "workloads", workerManifestPath)
-	manifestBytes, err := ioutil.ReadFile(path)
+	manifestBytes, err := os.ReadFile(path)
 	require.NoError(t, err)
 	mft, err := manifest.UnmarshalWorkload(manifestBytes)
 	require.NoError(t, err)
@@ -46,22 +47,35 @@ func TestWorkerService_Template(t *testing.T) {
 	v, ok := content.(*manifest.WorkerService)
 	require.True(t, ok)
 
-	ws, err := workspace.New()
+	// Create in-memory mock file system.
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	fs := afero.NewMemMapFs()
+	_ = fs.MkdirAll(fmt.Sprintf("%s/copilot", wd), 0755)
+	_ = afero.WriteFile(fs, fmt.Sprintf("%s/copilot/.workspace", wd), []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
 	require.NoError(t, err)
 
-	_, err = addon.Parse(aws.StringValue(v.Name), ws)
+	ws, err := workspace.Use(fs)
+	require.NoError(t, err)
+
+	_, err = addon.ParseFromWorkload(aws.StringValue(v.Name), ws)
 	var notFound *addon.ErrAddonsNotFound
 	require.ErrorAs(t, err, &notFound)
 
 	serializer, err := stack.NewWorkerService(stack.WorkerServiceConfig{
-		App:         appName,
-		Env:         envName,
-		Manifest:    v,
-		RawManifest: manifestBytes,
+		App: &config.Application{
+			Name: appName,
+		},
+		Env:                envName,
+		Manifest:           v,
+		ArtifactBucketName: "bucket",
+		RawManifest:        manifestBytes,
 		RuntimeConfig: stack.RuntimeConfig{
 			ServiceDiscoveryEndpoint: "test.my-app.local",
 			AccountID:                "123456789123",
 			Region:                   "us-west-2",
+			EnvVersion:               "v1.42.0",
+			Version:                  "v1.29.0",
 		},
 	})
 
@@ -76,12 +90,14 @@ func TestWorkerService_Template(t *testing.T) {
 		mActual := make(map[interface{}]interface{})
 		require.NoError(t, yaml.Unmarshal(actualBytes, mActual))
 
-		expected, err := ioutil.ReadFile(filepath.Join("testdata", "workloads", workerStackPath))
+		expected, err := os.ReadFile(filepath.Join("testdata", "workloads", workerStackPath))
 		require.NoError(t, err, "should be able to read expected bytes")
 		mExpected := make(map[interface{}]interface{})
 
 		require.NoError(t, yaml.Unmarshal(expected, mExpected))
-		require.Equal(t, mExpected, mActual)
+
+		resetCustomResourceLocations(mActual)
+		compareStackTemplate(t, mExpected, mActual)
 	})
 
 	t.Run("Parameter values should render properly", func(t *testing.T) {
@@ -89,7 +105,7 @@ func TestWorkerService_Template(t *testing.T) {
 		require.NoError(t, err)
 
 		path := filepath.Join("testdata", "workloads", workerParamsPath)
-		wantedCFNParamsBytes, err := ioutil.ReadFile(path)
+		wantedCFNParamsBytes, err := os.ReadFile(path)
 		require.NoError(t, err)
 
 		require.Equal(t, string(wantedCFNParamsBytes), actualParams)

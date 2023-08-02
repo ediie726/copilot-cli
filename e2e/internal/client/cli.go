@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega/gexec"
 )
 
@@ -93,6 +93,7 @@ type SvcInitRequest struct {
 	Image              string
 	SvcPort            string
 	TopicSubscriptions []string
+	IngressType        string
 }
 
 // SvcShowRequest contains the parameters for calling copilot svc show.
@@ -146,6 +147,7 @@ type StorageInitRequest struct {
 	StorageName  string
 	StorageType  string
 	WorkloadName string
+	Lifecycle    string
 
 	RDSEngine     string
 	InitialDBName string
@@ -274,22 +276,26 @@ func NewCLIWithDir(workingDir string) (*CLI, error) {
 	return cli, nil
 }
 
-/*Help runs
+/*
+Help runs
 copilot --help
 */
 func (cli *CLI) Help() (string, error) {
 	return cli.exec(exec.Command(cli.path, "--help"))
 }
 
-/*Version runs:
+/*
+Version runs:
 copilot --version
 */
 func (cli *CLI) Version() (string, error) {
 	return cli.exec(exec.Command(cli.path, "--version"))
 }
 
-/*Init runs:
+/*
+Init runs:
 copilot init
+
 	--app $p
 	--svc $s
 	--svc-type $type
@@ -326,8 +332,10 @@ func (cli *CLI) Init(opts *InitRequest) (string, error) {
 			portOption, opts.SvcPort))
 }
 
-/*SvcInit runs:
+/*
+SvcInit runs:
 copilot svc init
+
 	--name $n
 	--svc-type $t
 	--port $port
@@ -352,12 +360,17 @@ func (cli *CLI) SvcInit(opts *SvcInitRequest) (string, error) {
 	if len(opts.TopicSubscriptions) > 0 {
 		args = append(args, "--subscribe-topics", strings.Join(opts.TopicSubscriptions, ","))
 	}
+	if opts.IngressType != "" {
+		args = append(args, "--ingress-type", opts.IngressType)
+	}
 	return cli.exec(
 		exec.Command(cli.path, args...))
 }
 
-/*SvcShow runs:
+/*
+SvcShow runs:
 copilot svc show
+
 	--app $p
 	--name $n
 	--json
@@ -384,8 +397,10 @@ func (cli *CLI) SvcShow(opts *SvcShowRequest) (*SvcShowOutput, error) {
 	return toSvcShowOutput(svcJSON)
 }
 
-/*SvcStatus runs:
+/*
+SvcStatus runs:
 copilot svc status
+
 	--app $p
 	--env $e
 	--name $n
@@ -406,8 +421,10 @@ func (cli *CLI) SvcStatus(opts *SvcStatusRequest) (*SvcStatusOutput, error) {
 	return toSvcStatusOutput(svcJSON)
 }
 
-/*SvcExec runs:
+/*
+SvcExec runs:
 copilot svc exec
+
 	--app $p
 	--env $e
 	--name $n
@@ -428,8 +445,10 @@ func (cli *CLI) SvcExec(opts *SvcExecRequest) (string, error) {
 			"--yes=false"))
 }
 
-/*SvcDelete runs:
+/*
+SvcDelete runs:
 copilot svc delete
+
 	--name $n
 	--yes
 */
@@ -440,8 +459,10 @@ func (cli *CLI) SvcDelete(serviceName string) (string, error) {
 			"--yes"))
 }
 
-/*SvcDeploy runs:
+/*
+SvcDeploy runs:
 copilot svc deploy
+
 	--name $n
 	--env $e
 	--tag $t
@@ -459,8 +480,10 @@ func (cli *CLI) SvcDeploy(opts *SvcDeployInput) (string, error) {
 		exec.Command(cli.path, arguments...))
 }
 
-/*SvcList runs:
+/*
+SvcList runs:
 copilot svc ls
+
 	--app $p
 	--json
 */
@@ -475,8 +498,10 @@ func (cli *CLI) SvcList(appName string) (*SvcListOutput, error) {
 	return toSvcListOutput(output)
 }
 
-/*SvcLogs runs:
+/*
+SvcLogs runs:
 copilot svc logs
+
 	--app $p
 	--name $n
 	--since $s
@@ -497,8 +522,10 @@ func (cli *CLI) SvcLogs(opts *SvcLogsRequest) ([]SvcLogsOutput, error) {
 	return toSvcLogsOutput(output)
 }
 
-/*SvcPause runs:
+/*
+SvcPause runs:
 copilot svc pause
+
 	--app $p
 	--name $n
 	--env $e
@@ -512,8 +539,10 @@ func (cli *CLI) SvcPause(opts *SvcPauseRequest) (string, error) {
 			"--yes"))
 }
 
-/*SvcResume runs:
+/*
+SvcResume runs:
 copilot svc pause
+
 	--app $p
 	--name $n
 	--env $e
@@ -526,13 +555,15 @@ func (cli *CLI) SvcResume(opts *SvcResumeRequest) (string, error) {
 			"--env", opts.EnvName))
 }
 
-/*StorageInit runs:
+/*
+StorageInit runs:
 copilot storage init
-	--name $n
-	--storage-type $t
-	--workload $w
-	--engine $e
-  --initial-db $d
+
+		--name $n
+		--storage-type $t
+		--workload $w
+		--engine $e
+	  --initial-db $d
 */
 func (cli *CLI) StorageInit(opts *StorageInitRequest) (string, error) {
 	arguments := []string{
@@ -540,6 +571,7 @@ func (cli *CLI) StorageInit(opts *StorageInitRequest) (string, error) {
 		"--name", opts.StorageName,
 		"--storage-type", opts.StorageType,
 		"--workload", opts.WorkloadName,
+		"--lifecycle", opts.Lifecycle,
 	}
 
 	if opts.RDSEngine != "" {
@@ -554,8 +586,10 @@ func (cli *CLI) StorageInit(opts *StorageInitRequest) (string, error) {
 		exec.Command(cli.path, arguments...))
 }
 
-/*EnvDelete runs:
+/*
+EnvDelete runs:
 copilot env delete
+
 	--name $n
 	--yes
 */
@@ -566,8 +600,10 @@ func (cli *CLI) EnvDelete(envName string) (string, error) {
 			"--yes"))
 }
 
-/*EnvInit runs:
+/*
+EnvInit runs:
 copilot env init
+
 	--name $n
 	--app $a
 	--profile $pr
@@ -605,8 +641,10 @@ func (cli *CLI) EnvInit(opts *EnvInitRequest) (string, error) {
 	return cli.exec(exec.Command(cli.path, commands...))
 }
 
-/*EnvDeploy runs:
+/*
+EnvDeploy runs:
 copilot env deploy
+
 	--name $n
 	--app $a
 */
@@ -618,8 +656,10 @@ func (cli *CLI) EnvDeploy(opts *EnvDeployRequest) (string, error) {
 	return cli.exec(exec.Command(cli.path, commands...))
 }
 
-/*EnvShow runs:
+/*
+EnvShow runs:
 copilot env show
+
 	--app $a
 	--name $n
 	--json
@@ -637,8 +677,10 @@ func (cli *CLI) EnvShow(opts *EnvShowRequest) (*EnvShowOutput, error) {
 	return toEnvShowOutput(envJSON)
 }
 
-/*EnvList runs:
+/*
+EnvList runs:
 copilot env ls
+
 	--app $a
 	--json
 */
@@ -653,8 +695,10 @@ func (cli *CLI) EnvList(appName string) (*EnvListOutput, error) {
 	return toEnvListOutput(output)
 }
 
-/*AppInit runs:
+/*
+AppInit runs:
 copilot app init $a
+
 	--domain $d (optionally)
 	--resource-tags $k1=$v1,$k2=$k2 (optionally)
 */
@@ -676,8 +720,10 @@ func (cli *CLI) AppInit(opts *AppInitRequest) (string, error) {
 	return cli.exec(exec.Command(cli.path, commands...))
 }
 
-/*AppShow runs:
+/*
+AppShow runs:
 copilot app show
+
 	--name $n
 	--json
 */
@@ -693,6 +739,7 @@ func (cli *CLI) AppShow(appName string) (*AppShowOutput, error) {
 }
 
 // PipelineInit runs:
+//
 //	copilot pipeline init
 //	--name $n
 //	--url $t
@@ -713,6 +760,7 @@ func (cli *CLI) PipelineInit(opts PipelineInitInput) (string, error) {
 }
 
 // PipelineDeploy runs:
+//
 //	copilot pipeline deploy
 //	--name $n
 //	--yes
@@ -728,6 +776,7 @@ func (cli *CLI) PipelineDeploy(opts PipelineDeployInput) (string, error) {
 }
 
 // PipelineShow runs:
+//
 //	copilot pipeline show
 //	--name $n
 //	--json
@@ -752,6 +801,7 @@ func (cli *CLI) PipelineShow(opts PipelineShowInput) (PipelineShowOutput, error)
 }
 
 // PipelineStatus runs:
+//
 //	copilot pipeline show
 //	--name $n
 //	--json
@@ -775,14 +825,16 @@ func (cli *CLI) PipelineStatus(opts PipelineStatusInput) (PipelineStatusOutput, 
 	return out, nil
 }
 
-/*AppList runs:
+/*
+AppList runs:
 copilot app ls
 */
 func (cli *CLI) AppList() (string, error) {
 	return cli.exec(exec.Command(cli.path, "app", "ls"))
 }
 
-/*AppDelete runs:
+/*
+AppDelete runs:
 copilot app delete --yes
 */
 func (cli *CLI) AppDelete() (string, error) {
@@ -792,8 +844,10 @@ func (cli *CLI) AppDelete() (string, error) {
 		exec.Command(cli.path, commands...))
 }
 
-/*TaskRun runs:
+/*
+TaskRun runs:
 copilot task run
+
 	-n $t
 	--dockerfile $d
 	--app $a (optionally)
@@ -829,8 +883,10 @@ func (cli *CLI) TaskRun(input *TaskRunInput) (string, error) {
 	return cli.exec(exec.Command(cli.path, commands...))
 }
 
-/*TaskExec runs:
+/*
+TaskExec runs:
 copilot task exec
+
 	--app $p
 	--env $e
 	--name $n
@@ -847,8 +903,10 @@ func (cli *CLI) TaskExec(opts *TaskExecRequest) (string, error) {
 			"--yes=false"))
 }
 
-/*TaskDelete runs:
+/*
+TaskDelete runs:
 copilot task delete
+
 	--name $n
 	--yes
 	--default (optionally)
@@ -876,8 +934,10 @@ func (cli *CLI) TaskDelete(opts *TaskDeleteInput) (string, error) {
 	)
 }
 
-/*JobInit runs:
+/*
+JobInit runs:
 copilot job init
+
 	--name $n
 	--dockerfile $d
 	--schedule $sched
@@ -903,8 +963,10 @@ func (cli *CLI) JobInit(opts *JobInitInput) (string, error) {
 		exec.Command(cli.path, args...))
 }
 
-/*JobDeploy runs:
+/*
+JobDeploy runs:
 copilot job deploy
+
 	--name $n
 	--env $e
 	--tag $t
@@ -917,8 +979,10 @@ func (cli *CLI) JobDeploy(opts *JobDeployInput) (string, error) {
 			"--tag", opts.ImageTag))
 }
 
-/*JobDelete runs:
+/*
+JobDelete runs:
 copilot job delete
+
 	--name $n
 	--yes
 */
@@ -929,8 +993,10 @@ func (cli *CLI) JobDelete(jobName string) (string, error) {
 			"--yes"))
 }
 
-/*JobList runs:
+/*
+JobList runs:
 copilot job ls
+
 	--json?
 	--local?
 */
@@ -945,8 +1011,10 @@ func (cli *CLI) JobList(appName string) (*JobListOutput, error) {
 	return toJobListOutput(output)
 }
 
-/*JobPackage runs:
+/*
+JobPackage runs:
 copilot job package
+
 	--output-dir $dir
 	--name $name
 	--env $env
@@ -975,8 +1043,10 @@ func (cli *CLI) JobPackage(opts *PackageInput) (string, error) {
 	return cli.exec(exec.Command(cli.path, args...))
 }
 
-/*SvcPackage runs:
+/*
+SvcPackage runs:
 copilot svc package
+
 	--output-dir $dir
 	--name $name
 	--env $env

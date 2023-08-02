@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a scheduled job on Amazon ECS. 
+Metadata:
+  Version: v1.29.0
 Parameters: 
   AppName:
     Type: String
@@ -29,11 +31,17 @@ Parameters:
     Description: 'URL of the environment file.'
     Type: String
     Default: ""
+  EnvFileARNFornginx:
+    Description: 'URL of the environment file for the nginx sidecar.'
+    Type: String
+    Default: ""
 Conditions: 
   HasAddons: # If a bucket URL is specified, that means the template exists.
     !Not [!Equals [!Ref AddonsTemplateURL, ""]]
   HasEnvFile:
     !Not [!Equals [!Ref EnvFileARN, ""]]
+  HasEnvFileFornginx:
+    !Not [!Equals [!Ref EnvFileARNFornginx, ""]]
 Resources: 
   LogGroup:
     Metadata:
@@ -53,13 +61,11 @@ Resources:
       EnvStack: !Sub '${AppName}-${EnvName}'
       Parameters:
       - EFSWorkloads
+      EnvVersion: v1.42.0
 
   EnvControllerFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Code:
-        S3Bucket:
-        S3Key:
       Handler: "index.handler"
       Timeout: 900
       MemorySize: 512
@@ -130,6 +136,14 @@ Resources:
       ContainerDefinitions:
         - Name: !Ref WorkloadName
           Image: !Ref ContainerImage
+          Secrets:
+            - Name: DB
+              ValueFrom: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:demo/test/mysql'
+            - Name: GIT_USERNAME
+              ValueFrom:
+                Fn::ImportValue: "stack-SSMGHUserName"
+            - Name: SQL_PASS
+              ValueFrom: SQL_PASS
           # We pipe certain environment variables directly into the task definition.
           # This lets customers have access to, for example, their LB endpoint - which they'd
           # have no way of otherwise determining.
@@ -142,8 +156,14 @@ Resources:
             Value: !Sub '${EnvName}'
           - Name: COPILOT_SERVICE_NAME
             Value: !Sub '${WorkloadName}'
+          - Name: COPILOT_SNS_TOPIC_ARNS
+            Value: '{"mytopic.fifo":"arn:aws:sns:us-west-2:123456789123:my-app-test-job-mytopic.fifo"}'
+          - Name: DB_NAME
+            Value:
+              Fn::ImportValue: "MYDB"
           - Name: COPILOT_MOUNT_POINTS
             Value: '{"managedEFSVolume":"/etc/mount1"}'
+
           EnvironmentFiles:
           - !If
             - HasEnvFile
@@ -180,6 +200,7 @@ Resources:
               SourceVolume: managedEFSVolume
           PortMappings:
             - ContainerPort: 8080
+              Protocol: tcp
           Environment:
             - Name: COPILOT_APPLICATION_NAME
               Value: !Sub '${AppName}'
@@ -189,10 +210,26 @@ Resources:
               Value: !Sub '${EnvName}'
             - Name: COPILOT_SERVICE_NAME
               Value: !Sub '${WorkloadName}'
+            - Name: COPILOT_SNS_TOPIC_ARNS
+              Value: '{"mytopic.fifo":"arn:aws:sns:us-west-2:123456789123:my-app-test-job-mytopic.fifo"}'
             - Name: NGINX_PORT
               Value: '8080'
             - Name: COPILOT_MOUNT_POINTS
               Value: '{"managedEFSVolume":"/var/www"}'
+          EnvironmentFiles:
+          - !If
+            - HasEnvFileFornginx
+            - Type: s3
+              Value: !Ref EnvFileARNFornginx
+            - !Ref AWS::NoValue
+          Secrets:
+            - Name: DB
+              ValueFrom: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:demo/testing/mysql'
+            - Name: GIT_USERNAME
+              ValueFrom:
+                Fn::ImportValue: "stack-SSMGHUserName"
+            - Name: SQL_PASS
+              ValueFrom: SQL_PASS
           Essential: true
           DockerLabels:
             com.amazonaws.ecs.copilot.sidecars.nginx.description: tricky
@@ -269,6 +306,28 @@ Resources:
                         - ':s3:::'
                         - !Select [0, !Split ['/', !Select [5, !Split [':', !Ref EnvFileARN]]]]
           - !Ref AWS::NoValue
+        - !If
+          - HasEnvFileFornginx
+          - PolicyName: !Join ['', [!Ref AppName, '-', !Ref EnvName, '-', !Ref WorkloadName, GetEnvFilePolicyFornginx]]
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: 'Allow'
+                  Action:
+                    - 's3:GetObject'
+                  Resource:
+                    - !Ref EnvFileARNFornginx
+                - Effect: 'Allow'
+                  Action:
+                    - 's3:GetBucketLocation'
+                  Resource:
+                    - !Join
+                      - ''
+                      - - 'arn:'
+                        - !Ref AWS::Partition
+                        - ':s3:::'
+                        - !Select [0, !Split ['/', !Select [5, !Split [':', !Ref EnvFileARNFornginx]]]]
+          - !Ref AWS::NoValue
       ManagedPolicyArns:
         - 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
   
@@ -319,7 +378,14 @@ Resources:
                       region: !Ref AWS::Region
                       account: !Ref AWS::AccountId
                       fsid: !GetAtt EnvControllerAction.ManagedFileSystemID
-
+        - PolicyName: 'Publish2SNS'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 'sns:Publish'
+                Resource:
+                  - !Ref mytopicfifoSNSTopic
 
   Rule:
     Metadata:
@@ -382,6 +448,10 @@ Resources:
           Fn::Join:
           - '","'
           - - Fn::ImportValue: !Sub "${AppName}-${EnvName}-EnvironmentSecurityGroup"
+            - sg-0c10c4fe23f5e5361
+            - sg-09295097b2a41b59d
+            - Fn::ImportValue: MyUserDBAccessSecurityGroup1
+            - Fn::ImportValue: MyUserDBAccessSecurityGroup2
       DefinitionString: |-
         {
           "Version": "1.0",
@@ -517,3 +587,30 @@ Resources:
         Name: !Ref WorkloadName
       TemplateURL:
         !Ref AddonsTemplateURL
+
+  mytopicfifoSNSTopic:
+    Metadata:
+      'aws:copilot:description': 'A SNS FIFO topic to broadcast mytopic.fifo events'
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-mytopic.fifo'
+      FifoTopic: true
+      KmsMasterKeyId: 'alias/aws/sns'
+  mytopicfifoSNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    DependsOn: mytopicfifoSNSTopic
+    Properties:
+      Topics:
+        - !Ref mytopicfifoSNSTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - sns:Subscribe
+            Resource: !Ref mytopicfifoSNSTopic
+            Condition:
+              StringEquals:
+                "sns:Protocol": "sqs"

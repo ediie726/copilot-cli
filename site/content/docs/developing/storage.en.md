@@ -4,41 +4,59 @@ There are two ways to add persistence to Copilot workloads: using [`copilot stor
 
 ## Database and Artifacts
 
-To add a database or S3 bucket to your job or service, simply run [`copilot storage init`](../commands/storage-init.en.md).
-```bash
+To add a database or S3 bucket to your service, job, or environment, simply run [`copilot storage init`](../commands/storage-init.en.md).
+```console
 # For a guided experience.
 $ copilot storage init -t S3
 
-# To create a bucket named "my-bucket" accessible by the "api" service.
-$ copilot storage init -n my-bucket -t S3 -w api
+# To create a bucket named "my-bucket" that is accessible by the "api" service, and is deployed and deleted with "api".
+$ copilot storage init -n my-bucket -t S3 -w api -l workload
 ```
 
-The above command will create the Cloudformation template for an S3 bucket in the [addons](../developing/addons/modeling.en.md) directory for the "api" service. The next time you run `copilot deploy -n api`, the bucket will be created, permission to access it will be added to the `api` task role, and the name of the bucket will be injected into the `api` container under the environment variable `MY_BUCKET_NAME`.
+The above command will create the Cloudformation template for an S3 bucket in the [addons](./addons/workload.en.md) directory for the "api" service.
+The next time you run `copilot deploy -n api`, the bucket will be created, permission to access it will be added to the `api` task role,
+and the name of the bucket will be injected into the `api` container under the environment variable `MY_BUCKET_NAME`.
 
 !!!info
     All names are converted into SCREAMING_SNAKE_CASE based on their use of hyphens or underscores. You can view the environment variables for a given service by running `copilot svc show`.
 
-You can also create a [DynamoDB table](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) using `copilot storage init`. For example, to create the Cloudformation template for a table with a sort key and a local secondary index, you could run the following command.
+You can also create a [DynamoDB table](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) using `copilot storage init`.
+For example, to create the Cloudformation template for a table with a sort key and a local secondary index, you could run the following command:
 
-```bash
+```console
 # For a guided experience.
 $ copilot storage init -t DynamoDB
 
 # Or skip the prompts by providing flags.
-$ copilot storage init -n users -t DynamoDB -w api --partition-key id:N --sort-key email:S --lsi post-count:N
+$ copilot storage init -n users -t DynamoDB -w api -l workload --partition-key id:N --sort-key email:S --lsi post-count:N
 ```
 
 This will create a DynamoDB table called `${app}-${env}-${svc}-users`. Its partition key will be `id`, a `Number` attribute; its sort key will be `email`, a `String` attribute; and it will have a [local secondary index](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/LSI.html) (essentially an alternate sort key) on the `Number` attribute `post-count`.
 
-It is also possible to create an [RDS Aurora Serverless](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless.html) cluster using `copilot storage init`.
-```bash
+It is also possible to create an [RDS Aurora Serverless v2](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html) cluster using `copilot storage init`.
+```console
 # For a guided experience.
 $ copilot storage init -t Aurora
 
 # Or skip the prompts by providing flags.
-$ copilot storage init -n my-cluster -t Aurora -w api --engine PostgreSQL --initial-db my_db
+$ copilot storage init -n my-cluster -t Aurora -w api -l workload --engine PostgreSQL --initial-db my_db
 ```
-This will create an RDS Aurora Serverless cluster that uses PostgreSQL engine with a database named `my_db`. An environment variable named `MYCLUSTER_SECRET` is injected into your workload as a JSON string. The fields are `'host'`, `'port'`, `'dbname'`, `'username'`, `'password'`, `'dbClusterIdentifier'` and `'engine'`.
+This will create an RDS Aurora Serverless v2 cluster that uses PostgreSQL engine with a database named `my_db`. An environment variable named `MYCLUSTER_SECRET` is injected into your workload as a JSON string. The fields are `'host'`, `'port'`, `'dbname'`, `'username'`, `'password'`, `'dbClusterIdentifier'` and `'engine'`.
+
+To create an [RDS Aurora Serverless v1](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless.html) cluster, you can run
+```console
+$ copilot storage init -n my-cluster -t Aurora --serverless-version v1
+```
+
+### Environment storage
+
+The `-l` flag is short for `--lifecycle`. In the examples above, the value to the `-l` flag is `workload`.
+This means that the storage resources will be created as a service addon or a job addon. The storage will be deployed
+when you run `copilot [svc/job] deploy`, and will be deleted when you run `copilot [svc/job] delete`.
+
+Alternatively, if you want your storage to persist even after you delete the service or the job, you can create
+an environment storage resource. An environment storage resource is created as an environment addon: it is deployed when you run
+`copilot env deploy`, and isn't deleted until you run `copilot env delete`.
 
 ## File Systems
 There are two ways to use an EFS file system with Copilot: using managed EFS, and importing your own filesystem.
@@ -59,9 +77,7 @@ storage:
       read_only: false
 ```
 
-This manifest will result in an EFS volume being created at the environment level, with an Access Point and dedicated directory at the path `/frontend` in the EFS filesystem created specifically for your service. Your container will be able to access this directory and all its subdirectories at the `/var/efs` path in its own filesystem. The `/frontend` directory and EFS filesystem will persist until you delete your environment. 
-
-The use of an access point for each service ensures that no two services can access each other's data unless you specifically intend for them to do so by specifying the full advanced configuration. You can read more in [Advanced Use Cases](#advanced-use-cases).
+This manifest will result in an EFS volume being created at the environment level, with an Access Point and dedicated directory at the path `/frontend` in the EFS filesystem created specifically for your service. Your container will be able to access this directory and all its subdirectories at the `/var/efs` path in its own filesystem. The `/frontend` directory and EFS filesystem will persist until you delete your environment. The use of an access point for each service ensures that no two services can access each other's data.
 
 You can also customize the UID and GID used for the access point by specifying the `uid` and `gid` fields in advanced EFS configuration. If you do not specify a UID or GID, Copilot picks a pseudorandom UID and GID for the access point based on the [CRC32 checksum](https://stackoverflow.com/a/14210379/5890422) of the service's name. 
 
@@ -108,8 +124,11 @@ This may not be suitable for workloads which depend on the correct data being pr
 ###### Using `copilot svc exec`
 For workloads where data must be present prior to your task containers coming up, we recommend using a placeholder container first. 
 
-For example, deploy your service with the following values in the manifest:
+For example, deploy your `frontend` service with the following values in the manifest:
 ```yaml
+name: frontend
+type: Load Balanced Web Service
+
 image:
   location: amazon/amazon-ecs-sample
 exec: true
@@ -123,7 +142,7 @@ storage:
 ```
 
 Then, when your service is stable, run:
-```bash
+```console
 $ copilot svc exec
 ```
 This will open an interactive shell from which you can add packages like `curl` or `wget`, download data from the internet, create a directory structure, etc.
@@ -134,6 +153,9 @@ This will open an interactive shell from which you can add packages like `curl` 
 When you have populated the directory, modify your manifest to remove the `exec` directive and update the `build` field to your desired Docker build config or image location.
 
 ```yaml
+name: frontend
+type: Load Balanced Web Service
+
 image:
   build: ./Dockerfile
 storage:
@@ -201,7 +223,7 @@ To create mount targets for an existing filesystem, you'll need
 2. a Copilot environment deployed in the same account and region.
 
 To retrieve the filesystem ID, you can use the AWS CLI:
-```bash
+```console
 $ EFS_FILESYSTEMS=$(aws efs describe-file-systems | \
   jq '.FileSystems[] | {ID: .FileSystemId, CreationTime: .CreationTime, Size: .SizeInBytes.Value}')
 ```
@@ -213,7 +235,7 @@ You'll also need the public subnets of the Copilot environment and the Environme
 !!!info
     The filesystem you use MUST be in the same region as your Copilot environment!
 
-```bash
+```console
 $ SUBNETS=$(aws cloudformation describe-stacks --stack-name ${YOUR_APP}-${YOUR_ENV} \
   | jq '.Stacks[] | .Outputs[] | select(.OutputKey == "PublicSubnets") | .OutputValue')
 $ SUBNET1=$(echo $SUBNETS | jq -r 'split(",") | .[0]')
@@ -224,7 +246,7 @@ $ ENV_SG=$(aws cloudformation describe-stacks --stack-name ${YOUR_APP}-${YOUR_EN
 
 Once you have these, create the mount targets.
 
-```bash
+```console
 $ MOUNT_TARGET_1_ID=$(aws efs create-mount-target \
     --subnet-id $SUBNET_1 \
     --security-groups $ENV_SG \
@@ -241,7 +263,7 @@ Once you've done this, you can specify the `storage` configuration in the manife
 
 Delete the mount targets using the AWS CLI.
 
-```bash
+```console
 $ aws efs delete-mount-target --mount-target-id $MOUNT_TARGET_1
 $ aws efs delete-mount-target --mount-target-id $MOUNT_TARGET_2
 ```
@@ -307,7 +329,7 @@ Outputs:
 ```
 
 Then run:
-```bash
+```console
 $ aws cloudformation deploy
     --stack-name efs-cfn \
     --template-file ecs.yml
@@ -318,7 +340,7 @@ This will create an EFS file system and the mount targets your tasks need using 
 
 To get the EFS filesystem ID, you can run a `describe-stacks` call:
 
-```bash
+```console
 $ aws cloudformation describe-stacks --stack-name efs-cfn | \
     jq -r '.Stacks[] | .Outputs[] | .OutputValue'
 ```
@@ -339,12 +361,12 @@ Finally, run `copilot svc deploy` to reconfigure your service to mount the files
 
 ##### Cleanup
 To clean this up, remove the `storage` configuration from the manifest and redeploy the service:
-```bash
+```console
 $ copilot svc deploy
 ```
 
 Then, delete the stack.
 
-```bash
+```console
 $ aws cloudformation delete-stack --stack-name efs-cfn
 ```

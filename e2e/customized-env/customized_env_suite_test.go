@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/copilot-cli/e2e/internal/client"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -47,19 +47,9 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	_, err := cli.AppDelete()
-	Expect(err).NotTo(HaveOccurred())
+	_, appDeleteErr := cli.AppDelete()
 	// Delete VPC stack.
-	err = aws.DeleteStack(vpcStackName)
-	Expect(err).NotTo(HaveOccurred())
+	vpcDeleteErr := aws.DeleteStack(vpcStackName)
+	Expect(appDeleteErr).NotTo(HaveOccurred())
+	Expect(vpcDeleteErr).NotTo(HaveOccurred())
 })
-
-func BeforeAll(fn func()) {
-	first := true
-	BeforeEach(func() {
-		if first {
-			fn()
-			first = false
-		}
-	})
-}

@@ -107,6 +107,8 @@ The architecture type for your service. [Worker Services](../concepts/services.e
 <a id="subscribe" href="#subscribe" class="field">`subscribe`</a> <span class="type">Map</span>  
 The `subscribe` section allows worker services to create subscriptions to the SNS topics exposed by other Copilot services in the same application and environment. Each topic can define its own SQS queue, but by default all topics are subscribed to the worker service's default queue.
 
+The URI of the default queue will be injected into the container as an environment variable, `COPILOT_QUEUE_URI`. 
+
 ```yaml
 subscribe:
   topics:
@@ -133,6 +135,50 @@ Retention specifies the time a message will remain in the queue before being del
 
 <span class="parent-field">subscribe.queue.</span><a id="subscribe-queue-timeout" href="#subscribe-queue-timeout" class="field">`timeout`</a> <span class="type">Duration</span>  
 Timeout defines the length of time a message is unavailable after being delivered. Default 30s. Range 0s-12h.
+
+<span class="parent-field">subscribe.queue.</span><a id="subscribe-queue-fifo" href="#subscribe-queue-fifo" class="field">`fifo`</a> <span class="type">Boolean or Map</span>  
+Enable FIFO (first in, first out) ordering on your SQS queue to handle scenarios where the order of operations and events is critical, or where duplicates can't be tolerated.
+
+```yaml
+subscribe:
+  topics:
+    - name: events
+      service: api
+    - name: events
+      service: fe
+  queue: # Messages from both FIFO SNS Topics go to the shared FIFO SQS Queue.
+    fifo: true
+```
+When the queue is enabled with FIFO capabilities, Copilot requires that the source SNS topics [are also FIFO](../include/publish.en.md#publish-topics-topic-fifo).
+
+Alternatively, you can also specify advanced SQS FIFO queue configurations:
+```yaml
+subscribe:
+  topics:
+    - name: events
+      service: api
+      queue: # Define a topic-specific Standard queue for the api-events topic.
+        timeout: 20s
+    - name: events
+      service: fe
+  queue: # By default, messages from all FIFO topics will go to a shared FIFO queue.
+    fifo:
+      content_based_deduplication: true
+      high_throughput: true 
+```
+
+<span class="parent-field">subscribe.queue.fifo.</span><a id="subscribe-queue-fifo-content-based-deduplication" href="#subscribe-queue-fifo-content-based-deduplication" class="field">`content_based_deduplication`</a> <span class="type">Boolean</span>  
+If the message body is guaranteed to be unique for each published message, you can enable content-based deduplication for the SNS FIFO topic.
+
+<span class="parent-field">subscribe.queue.fifo.</span><a id="subscribe-queue-fifo-deduplication-scope" href="#subscribe-queue-fifo-deduplication-scope" class="field">`deduplication_scope`</a> <span class="type">String</span>  
+For high throughput for FIFO queues, specifies whether message deduplication occurs at the message group or queue level. Valid values are "messageGroup" and "queue".
+
+<span class="parent-field">subscribe.queue.fifo.</span><a id="subscribe-queue-fifo-throughput-limit" href="#subscribe-queue-fifo-throughput-limit" class="field">`throughput_limit`</a> <span class="type">String</span>  
+For high throughput for FIFO queues, specifies whether the FIFO queue throughput quota applies to the entire queue or per message group. Valid values are "perQueue" and "perMessageGroupId".
+
+<span class="parent-field">subscribe.queue.fifo.</span><a id="subscribe-queue-fifo-high-throughput" href="#subscribe-queue-fifo-high-throughput" class="field">`high_throughput`</a> <span class="type">Boolean</span>  
+If enabled, provides higher transactions per second (TPS) for messages in FIFO queues. Mutually exclusive with `deduplication_scope` and `throughput_limit`.
+
 
 <span class="parent-field">subscribe.queue.dead_letter.</span><a id="subscribe-queue-dead-letter-tries" href="#subscribe-queue-dead-letter-tries" class="field">`tries`</a> <span class="type">Integer</span>  
 If specified, creates a dead letter queue and a redrive policy which routes messages to the DLQ after `tries` attempts. That is, if a worker service fails to process a message successfully `tries` times, it will be routed to the DLQ for examination instead of redriven.
@@ -172,6 +218,25 @@ For additional information on how to write filter policies, see the [SNS documen
 
 <span class="parent-field">subscribe.topics.topic.</span><a id="topic-queue" href="#topic-queue" class="field">`queue`</a> <span class="type">Boolean or Map</span>  
 Optional. Specify SQS queue configuration for the topic. If specified as `true`, the queue will be created  with default configuration. Specify this field as a map for customization of certain attributes for this topic-specific queue.
+If you specify one or more topic-specific queues, you can access those queue URIs via the `COPILOT_TOPIC_QUEUE_URIS` variable.
+This variable is a JSON map from a unique identifier for the topic-specific queue to its URI.
+
+For example, a worker service with a topic-specific queue for the `orders` topic from the `merchant` service and a FIFO
+topic `transactions` from the `merchant` service will have the following JSON structure.
+
+```json
+// COPILOT_TOPIC_QUEUE_URIS
+{
+  "merchantOrdersEventsQueue": "https://sqs.eu-central-1.amazonaws.com/...",
+  "merchantTransactionsfifoEventsQueue": "https://sqs.eu-central-1.amazonaws.com/..."
+}
+```
+
+<span class="parent-field">subscribe.topics.topic.queue.</span><a id="subscribe-topics-topic-queue-fifo" href="#subscribe-topics-topic-queue-fifo" class="field">`fifo`</a> <span class="type">Boolean or Map</span>   
+Optional. Specify SQS FIFO queue configuration for the topic. If specified as `true`, the FIFO queue will be created with the default FIFO configuration. 
+Specify this field as a map for customization of certain attributes for this topic-specific queue.
+
+{% include 'image.md' %}
 
 {% include 'image-config.en.md' %}
 
@@ -294,6 +359,13 @@ Scale up and down cooldown fields for queue delay autoscaling.
 {% include 'exec.en.md' %}
 
 {% include 'deployment.en.md' %}
+```yaml 
+deployment:
+  rollback_alarms:
+    cpu_utilization: 70    // Percentage value at or above which alarm is triggered.
+    memory_utilization: 50 // Percentage value at or above which alarm is triggered.
+    messages_delayed: 5    // Number of delayed messages in the queue at or above which alarm is triggered. 
+```
 
 {% include 'entrypoint.en.md' %}
 

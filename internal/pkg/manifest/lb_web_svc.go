@@ -4,12 +4,16 @@
 package manifest
 
 import (
-	"errors"
+	"strconv"
 	"time"
+
+	"github.com/aws/copilot-cli/internal/pkg/term/color"
+	"github.com/aws/copilot-cli/internal/pkg/term/log"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/imdario/mergo"
 
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/template"
 )
 
@@ -20,15 +24,14 @@ const (
 // Default values for HTTPHealthCheck for a load balanced web service.
 const (
 	DefaultHealthCheckPath        = "/"
+	DefaultHealthCheckAdminPath   = "admin"
 	DefaultHealthCheckGracePeriod = 60
+	DefaultDeregistrationDelay    = 60
 )
 
 const (
-	GRPCProtocol = "gRPC" // GRPCProtocol is the HTTP protocol version for gRPC.
-)
-
-var (
-	errUnmarshalHealthCheckArgs = errors.New("can't unmarshal healthcheck field into string or compose-style map")
+	GRPCProtocol   = "gRPC" // GRPCProtocol is the HTTP protocol version for gRPC.
+	commonGRPCPort = uint16(50051)
 )
 
 // durationp is a utility function used to convert a time.Duration to a pointer. Useful for YAML unmarshaling
@@ -44,15 +47,14 @@ type LoadBalancedWebService struct {
 	LoadBalancedWebServiceConfig `yaml:",inline"`
 	// Use *LoadBalancedWebServiceConfig because of https://github.com/imdario/mergo/issues/146
 	Environments map[string]*LoadBalancedWebServiceConfig `yaml:",flow"` // Fields to override per environment.
-
-	parser template.Parser
+	parser       template.Parser
 }
 
 // LoadBalancedWebServiceConfig holds the configuration for a load balanced web service.
 type LoadBalancedWebServiceConfig struct {
 	ImageConfig      ImageWithPortAndHealthcheck `yaml:"image,flow"`
 	ImageOverride    `yaml:",inline"`
-	RoutingRule      RoutingRuleConfigOrBool `yaml:"http,flow"`
+	HTTPOrBool       HTTPOrBool `yaml:"http,flow"`
 	TaskConfig       `yaml:",inline"`
 	Logging          `yaml:"logging,flow"`
 	Sidecars         map[string]*SidecarConfig        `yaml:"sidecars"` // NOTE: keep the pointers because `mergo` doesn't automatically deep merge map's value unless it's a pointer type.
@@ -60,7 +62,7 @@ type LoadBalancedWebServiceConfig struct {
 	PublishConfig    PublishConfig                    `yaml:"publish"`
 	TaskDefOverrides []OverrideRule                   `yaml:"taskdef_overrides"`
 	NLBConfig        NetworkLoadBalancerConfiguration `yaml:"nlb"`
-	DeployConfig     DeploymentConfiguration          `yaml:"deployment"`
+	DeployConfig     DeploymentConfig                 `yaml:"deployment"`
 	Observability    Observability                    `yaml:"observability"`
 }
 
@@ -70,7 +72,6 @@ type LoadBalancedWebServiceProps struct {
 	Path string
 	Port uint16
 
-	HTTPVersion string               // Optional http protocol version such as gRPC, HTTP2.
 	HealthCheck ContainerHealthCheck // Optional healthcheck configuration.
 	Platform    PlatformArgsOrString // Optional platform configuration.
 }
@@ -90,21 +91,37 @@ func NewLoadBalancedWebService(props *LoadBalancedWebServiceProps) *LoadBalanced
 		svc.LoadBalancedWebServiceConfig.TaskConfig.CPU = aws.Int(MinWindowsTaskCPU)
 		svc.LoadBalancedWebServiceConfig.TaskConfig.Memory = aws.Int(MinWindowsTaskMemory)
 	}
-	if props.HTTPVersion != "" {
-		svc.RoutingRule.ProtocolVersion = &props.HTTPVersion
+
+	if props.Port == commonGRPCPort {
+		log.Infof("Detected port %s, setting HTTP protocol version to %s in the manifest.\n",
+			color.HighlightUserInput(strconv.Itoa(int(props.Port))), color.HighlightCode(GRPCProtocol))
+		svc.HTTPOrBool.Main.ProtocolVersion = aws.String(GRPCProtocol)
 	}
-	svc.RoutingRule.Path = aws.String(props.Path)
+	svc.HTTPOrBool.Main.Path = aws.String(props.Path)
 	svc.parser = template.New()
+	for _, envName := range props.PrivateOnlyEnvironments {
+		svc.Environments[envName] = &LoadBalancedWebServiceConfig{
+			Network: NetworkConfig{
+				VPC: vpcConfig{
+					Placement: PlacementArgOrString{
+						PlacementString: placementStringP(PrivateSubnetPlacement),
+					},
+				},
+			},
+		}
+	}
 	return svc
 }
 
 // newDefaultHTTPLoadBalancedWebService returns an empty LoadBalancedWebService with only the default values set, including default HTTP configurations.
 func newDefaultHTTPLoadBalancedWebService() *LoadBalancedWebService {
 	lbws := newDefaultLoadBalancedWebService()
-	lbws.RoutingRule = RoutingRuleConfigOrBool{
-		RoutingRuleConfiguration: RoutingRuleConfiguration{
-			HealthCheck: HealthCheckArgsOrString{
-				HealthCheckPath: aws.String(DefaultHealthCheckPath),
+	lbws.HTTPOrBool = HTTPOrBool{
+		HTTP: HTTP{
+			Main: RoutingRule{
+				HealthCheck: HealthCheckArgsOrString{
+					Union: BasicToUnion[string, HTTPHealthCheckArgs](DefaultHealthCheckPath),
+				},
 			},
 		},
 	}
@@ -115,7 +132,7 @@ func newDefaultHTTPLoadBalancedWebService() *LoadBalancedWebService {
 func newDefaultLoadBalancedWebService() *LoadBalancedWebService {
 	return &LoadBalancedWebService{
 		Workload: Workload{
-			Type: aws.String(LoadBalancedWebServiceType),
+			Type: aws.String(manifestinfo.LoadBalancedWebServiceType),
 		},
 		LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
 			ImageConfig: ImageWithPortAndHealthcheck{},
@@ -125,7 +142,7 @@ func newDefaultLoadBalancedWebService() *LoadBalancedWebService {
 				Count: Count{
 					Value: aws.Int(1),
 					AdvancedCount: AdvancedCount{ // Leave advanced count empty while passing down the type of the workload.
-						workloadType: LoadBalancedWebServiceType,
+						workloadType: manifestinfo.LoadBalancedWebServiceType,
 					},
 				},
 				ExecuteCommand: ExecuteCommand{
@@ -140,6 +157,7 @@ func newDefaultLoadBalancedWebService() *LoadBalancedWebService {
 				},
 			},
 		},
+		Environments: map[string]*LoadBalancedWebServiceConfig{},
 	}
 }
 
@@ -155,7 +173,7 @@ func (s *LoadBalancedWebService) MarshalBinary() ([]byte, error) {
 
 func (s *LoadBalancedWebService) requiredEnvironmentFeatures() []string {
 	var features []string
-	if !s.RoutingRule.Disabled() {
+	if !s.HTTPOrBool.Disabled() {
 		features = append(features, template.ALBFeatureName)
 	}
 	features = append(features, s.Network.requiredEnvFeatures()...)
@@ -171,22 +189,28 @@ func (s *LoadBalancedWebService) Port() (port uint16, ok bool) {
 
 // Publish returns the list of topics where notifications can be published.
 func (s *LoadBalancedWebService) Publish() []Topic {
-	return s.LoadBalancedWebServiceConfig.PublishConfig.Topics
+	return s.LoadBalancedWebServiceConfig.PublishConfig.publishedTopics()
 }
 
-// BuildRequired returns if the service requires building from the local Dockerfile.
-func (s *LoadBalancedWebService) BuildRequired() (bool, error) {
-	return requiresBuild(s.ImageConfig.Image)
+// BuildArgs returns a docker.BuildArguments object given a context directory.
+func (s *LoadBalancedWebService) BuildArgs(contextDir string) (map[string]*DockerBuildArgs, error) {
+	required, err := requiresBuild(s.ImageConfig.Image)
+	if err != nil {
+		return nil, err
+	}
+	// Creating an map to store buildArgs of all sidecar images and main container image.
+	buildArgsPerContainer := make(map[string]*DockerBuildArgs, len(s.Sidecars)+1)
+	if required {
+		buildArgsPerContainer[aws.StringValue(s.Name)] = s.ImageConfig.Image.BuildConfig(contextDir)
+	}
+	return buildArgs(contextDir, buildArgsPerContainer, s.Sidecars)
 }
 
-// BuildArgs returns a docker.BuildArguments object given a ws root directory.
-func (s *LoadBalancedWebService) BuildArgs(wsRoot string) *DockerBuildArgs {
-	return s.ImageConfig.Image.BuildConfig(wsRoot)
-}
-
-// EnvFile returns the location of the env file against the ws root directory.
-func (s *LoadBalancedWebService) EnvFile() string {
-	return aws.StringValue(s.TaskConfig.EnvFile)
+// EnvFiles returns the locations of all env files against the ws root directory.
+// This method returns a map[string]string where the keys are container names
+// and the values are either env file paths or empty strings.
+func (s *LoadBalancedWebService) EnvFiles() map[string]string {
+	return envFiles(s.Name, s.TaskConfig, s.Logging, s.Sidecars)
 }
 
 func (s *LoadBalancedWebService) subnets() *SubnetListOrArgs {
@@ -217,18 +241,74 @@ func (s LoadBalancedWebService) applyEnv(envName string) (workloadManifest, erro
 	return &s, nil
 }
 
-// NetworkLoadBalancerConfiguration holds options for a network load balancer
+// NetworkLoadBalancerConfiguration holds options for a network load balancer.
 type NetworkLoadBalancerConfiguration struct {
-	Port            *string            `yaml:"port"`
-	HealthCheck     NLBHealthCheckArgs `yaml:"healthcheck"`
-	TargetContainer *string            `yaml:"target_container"`
-	TargetPort      *int               `yaml:"target_port"`
-	SSLPolicy       *string            `yaml:"ssl_policy"`
-	Stickiness      *bool              `yaml:"stickiness"`
-	Aliases         Alias              `yaml:"alias"`
+	Listener            NetworkLoadBalancerListener   `yaml:",inline"`
+	Aliases             Alias                         `yaml:"alias"`
+	AdditionalListeners []NetworkLoadBalancerListener `yaml:"additional_listeners"`
 }
 
+// NetworkLoadBalancerListener holds listener configuration for NLB.
+type NetworkLoadBalancerListener struct {
+	Port                *string            `yaml:"port"`
+	HealthCheck         NLBHealthCheckArgs `yaml:"healthcheck"`
+	TargetContainer     *string            `yaml:"target_container"`
+	TargetPort          *int               `yaml:"target_port"`
+	SSLPolicy           *string            `yaml:"ssl_policy"`
+	Stickiness          *bool              `yaml:"stickiness"`
+	DeregistrationDelay *time.Duration     `yaml:"deregistration_delay"`
+}
+
+// IsEmpty returns true if NetworkLoadBalancerConfiguration is empty.
 func (c *NetworkLoadBalancerConfiguration) IsEmpty() bool {
+	return c.Aliases.IsEmpty() && c.Listener.IsEmpty() && len(c.AdditionalListeners) == 0
+}
+
+// IsEmpty returns true if NetworkLoadBalancerListener is empty.
+func (c *NetworkLoadBalancerListener) IsEmpty() bool {
 	return c.Port == nil && c.HealthCheck.isEmpty() && c.TargetContainer == nil && c.TargetPort == nil &&
-		c.SSLPolicy == nil && c.Stickiness == nil && c.Aliases.IsEmpty()
+		c.SSLPolicy == nil && c.Stickiness == nil && c.DeregistrationDelay == nil
+}
+
+// ExposedPorts returns all the ports that are container ports available to receive traffic.
+func (lbws *LoadBalancedWebService) ExposedPorts() (ExposedPortsIndex, error) {
+	var exposedPorts []ExposedPort
+	workloadName := aws.StringValue(lbws.Name)
+	// port from image.port.
+	exposedPorts = append(exposedPorts, lbws.ImageConfig.exposedPorts(workloadName)...)
+	// port from sidecar[x].image.port.
+	for name, sidecar := range lbws.Sidecars {
+		out, err := sidecar.exposedPorts(name)
+		if err != nil {
+			return ExposedPortsIndex{}, err
+		}
+		exposedPorts = append(exposedPorts, out...)
+	}
+	// port from http.target_port and http.additional_rules[x].target_port
+	for _, rule := range lbws.HTTPOrBool.RoutingRules() {
+		exposedPorts = append(exposedPorts, rule.exposedPorts(exposedPorts, workloadName)...)
+	}
+
+	// port from nlb.target_port and nlb.additional_listeners[x].target_port
+	for _, listener := range lbws.NLBConfig.NLBListeners() {
+		out, err := listener.exposedPorts(exposedPorts, workloadName)
+		if err != nil {
+			return ExposedPortsIndex{}, err
+		}
+		exposedPorts = append(exposedPorts, out...)
+	}
+	portsForContainer, containerForPort := prepareParsedExposedPortsMap(sortExposedPorts(exposedPorts))
+	return ExposedPortsIndex{
+		WorkloadName:      workloadName,
+		PortsForContainer: portsForContainer,
+		ContainerForPort:  containerForPort,
+	}, nil
+}
+
+// NLBListeners returns main as well as additional listeners as a list of NetworkLoadBalancerListener.
+func (cfg NetworkLoadBalancerConfiguration) NLBListeners() []NetworkLoadBalancerListener {
+	if cfg.IsEmpty() {
+		return nil
+	}
+	return append([]NetworkLoadBalancerListener{cfg.Listener}, cfg.AdditionalListeners...)
 }

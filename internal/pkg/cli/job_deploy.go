@@ -4,13 +4,19 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/aws/copilot-cli/internal/pkg/describe"
+	"github.com/aws/copilot-cli/internal/pkg/version"
+	"github.com/spf13/afero"
 
+	deploycfn "github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/exec"
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
@@ -37,10 +43,14 @@ type deployJobOpts struct {
 	unmarshal            func(in []byte) (manifest.DynamicWorkload, error)
 	newInterpolator      func(app, env string) interpolator
 	cmd                  execRunner
+	jobVersionGetter     versionGetter
 	sessProvider         *sessions.Provider
 	newJobDeployer       func() (workloadDeployer, error)
 	envFeaturesDescriber versionCompatibilityChecker
 	sel                  wsSelector
+	prompt               prompter
+	gitShortCommit       string
+	diffWriter           io.Writer
 
 	// cached variables
 	targetApp         *config.Application
@@ -48,6 +58,9 @@ type deployJobOpts struct {
 	envSess           *session.Session
 	appliedDynamicMft manifest.DynamicWorkload
 	rootUserARN       string
+
+	// Overridden in tests.
+	templateVersion string
 }
 
 func newJobDeployOpts(vars deployWkldVars) (*deployJobOpts, error) {
@@ -57,10 +70,9 @@ func newJobDeployOpts(vars deployWkldVars) (*deployJobOpts, error) {
 		return nil, err
 	}
 	store := config.NewSSMStore(identity.New(defaultSess), ssm.New(defaultSess), aws.StringValue(defaultSess.Config.Region))
-
-	ws, err := workspace.New()
+	ws, err := workspace.Use(afero.NewOsFs())
 	if err != nil {
-		return nil, fmt.Errorf("new workspace: %w", err)
+		return nil, err
 	}
 	prompter := prompt.New()
 	opts := &deployJobOpts{
@@ -70,9 +82,12 @@ func newJobDeployOpts(vars deployWkldVars) (*deployJobOpts, error) {
 		ws:              ws,
 		unmarshal:       manifest.UnmarshalWorkload,
 		sel:             selector.NewLocalWorkloadSelector(prompter, store, ws),
+		prompt:          prompter,
 		sessProvider:    sessProvider,
 		newInterpolator: newManifestInterpolator,
 		cmd:             exec.NewCmd(),
+		templateVersion: version.LatestTemplateVersion(),
+		diffWriter:      os.Stdout,
 	}
 	opts.newJobDeployer = func() (workloadDeployer, error) {
 		// NOTE: Defined as a struct member to facilitate unit testing.
@@ -86,15 +101,25 @@ func newJobDeployer(o *deployJobOpts) (workloadDeployer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read manifest file for %s: %w", o.name, err)
 	}
+	ovrdr, err := deploy.NewOverrider(o.ws.WorkloadOverridesPath(o.name), o.appName, o.envName, afero.NewOsFs(), o.sessProvider)
+	if err != nil {
+		return nil, err
+	}
+
 	content := o.appliedDynamicMft.Manifest()
 	in := deploy.WorkloadDeployerInput{
 		SessionProvider: o.sessProvider,
 		Name:            o.name,
 		App:             o.targetApp,
 		Env:             o.targetEnv,
-		ImageTag:        o.imageTag,
-		Mft:             content,
-		RawMft:          raw,
+		Image: deploy.ContainerImageIdentifier{
+			CustomTag:         o.imageTag,
+			GitShortCommitTag: o.gitShortCommit,
+		},
+		Mft:              content,
+		RawMft:           raw,
+		EnvVersionGetter: o.envFeaturesDescriber,
+		Overrider:        ovrdr,
 	}
 	var deployer workloadDeployer
 	switch t := content.(type) {
@@ -145,6 +170,11 @@ func (o *deployJobOpts) Execute() error {
 			return err
 		}
 	}
+	if !o.allowWkldDowngrade {
+		if err := validateWkldVersion(o.jobVersionGetter, o.name, o.templateVersion); err != nil {
+			return err
+		}
+	}
 	mft, err := workloadManifest(&workloadManifestInput{
 		name:         o.name,
 		appName:      o.appName,
@@ -178,12 +208,44 @@ func (o *deployJobOpts) Execute() error {
 	if err != nil {
 		return fmt.Errorf("upload deploy resources for job %s: %w", o.name, err)
 	}
+	if o.showDiff {
+		output, err := deployer.GenerateCloudFormationTemplate(&deploy.GenerateCloudFormationTemplateInput{
+			StackRuntimeConfiguration: deploy.StackRuntimeConfiguration{
+				RootUserARN:        o.rootUserARN,
+				Tags:               o.targetApp.Tags,
+				EnvFileARNs:        uploadOut.EnvFileARNs,
+				ImageDigests:       uploadOut.ImageDigests,
+				AddonsURL:          uploadOut.AddonsURL,
+				Version:            o.templateVersion,
+				CustomResourceURLs: uploadOut.CustomResourceURLs,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("generate the template for job %q against environment %q: %w", o.name, o.envName, err)
+		}
+		if err := diff(deployer, output.Template, o.diffWriter); err != nil {
+			var errHasDiff *errHasDiff
+			if !errors.As(err, &errHasDiff) {
+				return err
+			}
+		}
+		contd, err := o.prompt.Confirm(continueDeploymentPrompt, "")
+		if err != nil {
+			return fmt.Errorf("ask whether to continue with the deployment: %w", err)
+		}
+		if !contd {
+			return nil
+		}
+	}
+	var errStackDeletedOnInterrupt *deploycfn.ErrStackDeletedOnInterrupt
+	var errStackUpdateCanceledOnInterrupt *deploycfn.ErrStackUpdateCanceledOnInterrupt
 	if _, err = deployer.DeployWorkload(&deploy.DeployWorkloadInput{
 		StackRuntimeConfiguration: deploy.StackRuntimeConfiguration{
-			ImageDigest:        uploadOut.ImageDigest,
-			EnvFileARN:         uploadOut.EnvFileARN,
+			ImageDigests:       uploadOut.ImageDigests,
+			EnvFileARNs:        uploadOut.EnvFileARNs,
 			AddonsURL:          uploadOut.AddonsURL,
 			RootUserARN:        o.rootUserARN,
+			Version:            o.templateVersion,
 			Tags:               tags.Merge(o.targetApp.Tags, o.resourceTags),
 			CustomResourceURLs: uploadOut.CustomResourceURLs,
 		},
@@ -191,8 +253,15 @@ func (o *deployJobOpts) Execute() error {
 			DisableRollback: o.disableRollback,
 		},
 	}); err != nil {
+		if errors.As(err, &errStackDeletedOnInterrupt) {
+			return nil
+		}
+		if errors.As(err, &errStackUpdateCanceledOnInterrupt) {
+			log.Successf("Successfully rolled back service %s to the previous configuration.\n", color.HighlightUserInput(o.name))
+			return nil
+		}
 		if o.disableRollback {
-			stackName := stack.NameForService(o.targetApp.Name, o.targetEnv.Name, o.name)
+			stackName := stack.NameForWorkload(o.targetApp.Name, o.targetEnv.Name, o.name)
 			rollbackCmd := fmt.Sprintf("aws cloudformation rollback-stack --stack-name %s --role-arn %s", stackName, o.targetEnv.ExecutionRoleARN)
 			log.Infof(`It seems like you have disabled automatic stack rollback for this deployment. To debug, you can visit the AWS console to inspect the errors.
 After fixing the deployment, you can:
@@ -207,7 +276,7 @@ After fixing the deployment, you can:
 }
 
 func (o *deployJobOpts) configureClients() error {
-	o.imageTag = imageTagFromGit(o.cmd, o.imageTag) // Best effort assign git tag.
+	o.gitShortCommit = imageTagFromGit(o.cmd) // Best effort assign git tag.
 	env, err := o.store.GetEnvironment(o.appName, o.envName)
 	if err != nil {
 		return err
@@ -246,6 +315,17 @@ func (o *deployJobOpts) configureClients() error {
 		return err
 	}
 	o.envFeaturesDescriber = envDescriber
+
+	wkldDescriber, err := describe.NewWorkloadStackDescriber(describe.NewWorkloadConfig{
+		App:         o.appName,
+		Env:         o.envName,
+		Name:        o.name,
+		ConfigStore: o.store,
+	})
+	if err != nil {
+		return err
+	}
+	o.jobVersionGetter = wkldDescriber
 	return nil
 }
 
@@ -326,6 +406,7 @@ func buildJobDeployCmd() *cobra.Command {
 	cmd.Flags().StringVar(&vars.imageTag, imageTagFlag, "", imageTagFlagDescription)
 	cmd.Flags().StringToStringVar(&vars.resourceTags, resourceTagsFlag, nil, resourceTagsFlagDescription)
 	cmd.Flags().BoolVar(&vars.disableRollback, noRollbackFlag, false, noRollbackFlagDescription)
-
+	cmd.Flags().BoolVar(&vars.showDiff, diffFlag, false, diffFlagDescription)
+	cmd.Flags().BoolVar(&vars.allowWkldDowngrade, allowDowngradeFlag, false, allowDowngradeFlagDescription)
 	return cmd
 }

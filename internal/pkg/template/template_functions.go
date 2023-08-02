@@ -20,7 +20,14 @@ import (
 
 const (
 	dashReplacement = "DASH"
+	plusReplacement = "%2B"
 )
+
+// URLSafeVersion takes a Copilot version and replaces the '+'
+// character with the URL-safe '%2B'.
+func URLSafeVersion(version string) string {
+	return strings.ReplaceAll(version, "+", plusReplacement)
+}
 
 // ReplaceDashesFunc takes a CloudFormation logical ID, and
 // sanitizes it by removing "-" characters (not allowed)
@@ -30,7 +37,7 @@ func ReplaceDashesFunc(logicalID string) string {
 	return strings.ReplaceAll(logicalID, "-", dashReplacement)
 }
 
-// IsArnFunc takes a string value and determines if it's an ARN or not.
+// IsARNFunc takes a string value and determines if it's an ARN or not.
 func IsARNFunc(value string) bool {
 	return arn.IsARN(value)
 }
@@ -57,6 +64,16 @@ func StripNonAlphaNumFunc(s string) string {
 // "Name" to the end.
 func EnvVarNameFunc(s string) string {
 	return StripNonAlphaNumFunc(s) + "Name"
+}
+
+// HasCustomIngress returns true if there is any ingress specified by the customer.
+func (cfg *PublicHTTPConfig) HasCustomIngress() bool {
+	return len(cfg.PublicALBSourceIPs) > 0 || len(cfg.CIDRPrefixListIDs) > 0
+}
+
+// IsFIFO checks if the given queue has FIFO config.
+func (s SQSQueue) IsFIFO() bool {
+	return s.FIFOQueueConfig != nil
 }
 
 // EnvVarSecretFunc converts an input resource name to LogicalIDSafe, then appends
@@ -94,11 +111,10 @@ func FmtSliceFunc(elems []string) string {
 
 // QuoteSliceFunc places quotation marks around all elements of a go string slice.
 func QuoteSliceFunc(elems []string) []string {
-	var quotedElems []string
 	if len(elems) == 0 {
-		return quotedElems
+		return nil
 	}
-	quotedElems = make([]string, len(elems))
+	quotedElems := make([]string, len(elems))
 	for i, el := range elems {
 		quotedElems[i] = strconv.Quote(el)
 	}

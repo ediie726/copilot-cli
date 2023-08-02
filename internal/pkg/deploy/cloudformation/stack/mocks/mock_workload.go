@@ -11,31 +11,31 @@ import (
 	gomock "github.com/golang/mock/gomock"
 )
 
-// Mockaddons is a mock of addons interface.
-type Mockaddons struct {
+// MockNestedStackConfigurer is a mock of NestedStackConfigurer interface.
+type MockNestedStackConfigurer struct {
 	ctrl     *gomock.Controller
-	recorder *MockaddonsMockRecorder
+	recorder *MockNestedStackConfigurerMockRecorder
 }
 
-// MockaddonsMockRecorder is the mock recorder for Mockaddons.
-type MockaddonsMockRecorder struct {
-	mock *Mockaddons
+// MockNestedStackConfigurerMockRecorder is the mock recorder for MockNestedStackConfigurer.
+type MockNestedStackConfigurerMockRecorder struct {
+	mock *MockNestedStackConfigurer
 }
 
-// NewMockaddons creates a new mock instance.
-func NewMockaddons(ctrl *gomock.Controller) *Mockaddons {
-	mock := &Mockaddons{ctrl: ctrl}
-	mock.recorder = &MockaddonsMockRecorder{mock}
+// NewMockNestedStackConfigurer creates a new mock instance.
+func NewMockNestedStackConfigurer(ctrl *gomock.Controller) *MockNestedStackConfigurer {
+	mock := &MockNestedStackConfigurer{ctrl: ctrl}
+	mock.recorder = &MockNestedStackConfigurerMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *Mockaddons) EXPECT() *MockaddonsMockRecorder {
+func (m *MockNestedStackConfigurer) EXPECT() *MockNestedStackConfigurerMockRecorder {
 	return m.recorder
 }
 
 // Parameters mocks base method.
-func (m *Mockaddons) Parameters() (string, error) {
+func (m *MockNestedStackConfigurer) Parameters() (string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Parameters")
 	ret0, _ := ret[0].(string)
@@ -44,13 +44,13 @@ func (m *Mockaddons) Parameters() (string, error) {
 }
 
 // Parameters indicates an expected call of Parameters.
-func (mr *MockaddonsMockRecorder) Parameters() *gomock.Call {
+func (mr *MockNestedStackConfigurerMockRecorder) Parameters() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Parameters", reflect.TypeOf((*Mockaddons)(nil).Parameters))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Parameters", reflect.TypeOf((*MockNestedStackConfigurer)(nil).Parameters))
 }
 
 // Template mocks base method.
-func (m *Mockaddons) Template() (string, error) {
+func (m *MockNestedStackConfigurer) Template() (string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Template")
 	ret0, _ := ret[0].(string)
@@ -59,9 +59,9 @@ func (m *Mockaddons) Template() (string, error) {
 }
 
 // Template indicates an expected call of Template.
-func (mr *MockaddonsMockRecorder) Template() *gomock.Call {
+func (mr *MockNestedStackConfigurerMockRecorder) Template() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Template", reflect.TypeOf((*Mockaddons)(nil).Template))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Template", reflect.TypeOf((*MockNestedStackConfigurer)(nil).Template))
 }
 
 // Mocklocation is a mock of location interface.
@@ -99,6 +99,57 @@ func (m *Mocklocation) GetLocation() string {
 func (mr *MocklocationMockRecorder) GetLocation() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLocation", reflect.TypeOf((*Mocklocation)(nil).GetLocation))
+}
+
+// Mockuploadable is a mock of uploadable interface.
+type Mockuploadable struct {
+	ctrl     *gomock.Controller
+	recorder *MockuploadableMockRecorder
+}
+
+// MockuploadableMockRecorder is the mock recorder for Mockuploadable.
+type MockuploadableMockRecorder struct {
+	mock *Mockuploadable
+}
+
+// NewMockuploadable creates a new mock instance.
+func NewMockuploadable(ctrl *gomock.Controller) *Mockuploadable {
+	mock := &Mockuploadable{ctrl: ctrl}
+	mock.recorder = &MockuploadableMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *Mockuploadable) EXPECT() *MockuploadableMockRecorder {
+	return m.recorder
+}
+
+// ArtifactPath mocks base method.
+func (m *Mockuploadable) ArtifactPath() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ArtifactPath")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// ArtifactPath indicates an expected call of ArtifactPath.
+func (mr *MockuploadableMockRecorder) ArtifactPath() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ArtifactPath", reflect.TypeOf((*Mockuploadable)(nil).ArtifactPath))
+}
+
+// Name mocks base method.
+func (m *Mockuploadable) Name() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Name")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// Name indicates an expected call of Name.
+func (mr *MockuploadableMockRecorder) Name() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Name", reflect.TypeOf((*Mockuploadable)(nil).Name))
 }
 
 // MocktemplateConfigurer is a mock of templateConfigurer interface.

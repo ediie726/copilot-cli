@@ -15,12 +15,13 @@ Parameters:
     Description: The environment name your service, job, or workflow is being deployed to.
   Name:
     Type: String
-    Description: The name of the service, job, or workflow being deployed.
+    Description: Your workload's name.
   IsProd:
     Type: String
     Default: "false"
   InstanceType:
     Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: mini
 Mappings:
   MyTableDynamoDBSettings:
     test:
@@ -108,6 +109,8 @@ Resources:
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
   MyBucketAccessPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:

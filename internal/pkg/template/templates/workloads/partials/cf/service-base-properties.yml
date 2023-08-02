@@ -16,6 +16,32 @@ DeploymentConfiguration:
     Rollback: true
   MinimumHealthyPercent: {{ .DeploymentConfiguration.MinHealthyPercent }}
   MaximumPercent: {{ .DeploymentConfiguration.MaxPercent }}
+  Alarms:
+  {{- if .DeploymentConfiguration.Rollback.HasRollbackAlarms }}
+    {{- if .DeploymentConfiguration.Rollback.AlarmNames }}
+    AlarmNames: {{ fmtSlice (quoteSlice .DeploymentConfiguration.Rollback.AlarmNames) }}
+    {{- else if .DeploymentConfiguration.Rollback.HasCustomAlarms }}
+    AlarmNames:
+      {{- if .DeploymentConfiguration.Rollback.CPUUtilization }}
+      - {{.DeploymentConfiguration.Rollback.TruncateAlarmName .AppName .EnvName .WorkloadName "CopilotRollbackCPUAlarm"}}
+      {{- end }}
+      {{- if .DeploymentConfiguration.Rollback.MemoryUtilization }}
+      - {{.DeploymentConfiguration.Rollback.TruncateAlarmName .AppName .EnvName .WorkloadName "CopilotRollbackMemAlarm"}}
+      {{- end }}
+      {{- if .DeploymentConfiguration.Rollback.MessagesDelayed }}
+      - {{.DeploymentConfiguration.Rollback.TruncateAlarmName .AppName .EnvName .WorkloadName "CopilotRollbackMsgsDelayedAlarm"}}
+      {{- end }}
+    {{- end }}
+    Enable: true
+    Rollback: true
+  {{- else }}
+    !If
+    - IsGovCloud
+    - !Ref AWS::NoValue
+    - Enable: false
+      AlarmNames: []
+      Rollback: true
+  {{- end }}
 PropagateTags: SERVICE
 {{- if .ExecuteCommand }}
 EnableExecuteCommand: true
@@ -33,6 +59,35 @@ CapacityProviderStrategy:
     {{- end}}
   {{- end}}
 {{- end }}
+ServiceConnectConfiguration:
+  {{- if .ServiceConnect }}
+  Enabled: True
+  Namespace: {{.ServiceDiscoveryEndpoint}}
+  LogConfiguration:
+    LogDriver: awslogs
+    Options:
+      awslogs-region: !Ref AWS::Region
+      awslogs-group: !Ref LogGroup
+      awslogs-stream-prefix: copilot
+  {{- if .HTTPTargetContainer.Exposed}}
+  Services:
+    - PortName: target
+      # Avoid using the same service with Service Discovery in a namespace.
+      DiscoveryName: !Join ["-", [!Ref WorkloadName, "sc"]] 
+      ClientAliases:
+        - Port: !Ref TargetPort
+          {{- if .ServiceConnect.Alias }}
+          DnsName: {{.ServiceConnect.Alias}}
+          {{- else}}
+          DnsName: !Ref WorkloadName
+          {{- end}}
+  {{- end}}
+  {{- else}}
+  !If
+    - IsGovCloud
+    - !Ref AWS::NoValue
+    - Enabled: False
+  {{- end}}
 NetworkConfiguration:
   AwsvpcConfiguration:
     AssignPublicIp: {{.Network.AssignPublicIP}}
@@ -51,7 +106,10 @@ NetworkConfiguration:
       - Fn::ImportValue: !Sub '${AppName}-${EnvName}-EnvironmentSecurityGroup'
       {{- end}}
       {{- range $sg := .Network.SecurityGroups}}
-      - {{$sg}}
+      {{- if not $sg.RequiresImport}}
+      - {{$sg.Value}}
+      {{- else}}
+      - Fn::ImportValue: {{$sg.Value}} {{- end}}
       {{- end}}
       {{- if .NLB}}
       - !Ref NLBSecurityGroup

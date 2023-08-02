@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a request driven web service on AWS App Runner.
+Metadata:
+  Version: v1.29.0
 Parameters:
   AppName:
     Type: String
@@ -86,7 +88,8 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: tasks.apprunner.amazonaws.com
+              Service:
+                - tasks.apprunner.amazonaws.com
             Action: 'sts:AssumeRole'
       Policies:
         - PolicyName: 'DenyIAMExceptTaggedRoles'
@@ -104,6 +107,33 @@ Resources:
                   StringEquals:
                     'iam:ResourceTag/copilot-application': !Sub '${AppName}'
                     'iam:ResourceTag/copilot-environment': !Sub '${EnvName}'
+        - PolicyName: 'AccessCopilotTaggedSecrets'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*'
+                Condition:
+                  StringEquals:
+                    'ssm:ResourceTag/copilot-application': !Sub '${AppName}'
+                    'ssm:ResourceTag/copilot-environment': !Sub '${EnvName}'
+              - Effect: 'Allow'
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
+                Condition:
+                  StringEquals:
+                    'secretsmanager:ResourceTag/copilot-application': !Sub '${AppName}'
+                    'secretsmanager:ResourceTag/copilot-environment': !Sub '${EnvName}'
+              - Effect: 'Allow'
+                Action:
+                  - 'kms:Decrypt'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
         - PolicyName: 'Publish2SNS'
           PolicyDocument:
             Version: '2012-10-17'
@@ -112,6 +142,7 @@ Resources:
                 Action: 'sns:Publish'
                 Resource:
                 - !Ref customersSNSTopic
+                - !Ref mytopicfifoSNSTopic
   Service:
     Metadata:
       'aws:copilot:description': 'An App Runner service to run and manage your containers'
@@ -129,6 +160,14 @@ Resources:
           ImageRepositoryType: !Ref ImageRepositoryType
           ImageConfiguration:
             Port: !Ref ContainerPort
+            RuntimeEnvironmentSecrets:
+              - Name: MY_FROM_CFN_SECRET
+                Value:
+                  Fn::ImportValue: 'my-other-stack-exported-secret'
+              - Name: MY_SECRETS_MANAGER_SECRET
+                Value:  !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mysecretsmanagername'
+              - Name: my-ssm-secret
+                Value:  arn:aws:ssm:us-east-1:123456789123:parameter/jan11ssm
             RuntimeEnvironmentVariables:
               - Name: COPILOT_APPLICATION_NAME
                 Value: !Ref AppName
@@ -139,7 +178,10 @@ Resources:
               - Name: COPILOT_SERVICE_DISCOVERY_ENDPOINT
                 Value: 
               - Name: COPILOT_SNS_TOPIC_ARNS
-                Value: '{"customers":"arn:aws:sns:us-west-2:123456789123:my-app-test-frontend-customers"}'
+                Value: '{"customers":"arn:aws:sns:us-west-2:123456789123:my-app-test-frontend-customers","mytopic.fifo":"arn:aws:sns:us-west-2:123456789123:my-app-test-frontend-mytopic.fifo"}'
+              - Name: DB_NAME
+                Value:
+                  Fn::ImportValue: "test-UserDB"
               - Name: LOG_LEVEL
                 Value: "debug"
             StartCommand: crazy diamond
@@ -151,6 +193,7 @@ Resources:
         EgressConfiguration:
           EgressType: VPC
           VpcConnectorArn: !Ref VpcConnector
+      AutoScalingConfigurationArn: 'arn:${AWS::Partition}:apprunner:${AWS::Region}:${AWS::AccountId}:autoscalingconfiguration/high-availability/3'    
       Tags:
         - Key: copilot-application
           Value: !Ref AppName
@@ -200,6 +243,33 @@ Resources:
             Condition:
               StringEquals:
                 "sns:Protocol": "sqs"
+  mytopicfifoSNSTopic:
+    Metadata:
+      'aws:copilot:description': 'A SNS FIFO topic to broadcast mytopic.fifo events'
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-mytopic.fifo'
+      FifoTopic: true
+      KmsMasterKeyId: 'alias/aws/sns'
+
+  mytopicfifoSNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    DependsOn: mytopicfifoSNSTopic
+    Properties:
+      Topics:
+        - !Ref mytopicfifoSNSTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - sns:Subscribe
+            Resource: !Ref mytopicfifoSNSTopic
+            Condition:
+              StringEquals:
+                "sns:Protocol": "sqs"
   EnvControllerAction:
     Metadata:
       'aws:copilot:description': "Update your environment's shared resources"
@@ -209,13 +279,11 @@ Resources:
       Workload: !Ref WorkloadName
       EnvStack: !Sub '${AppName}-${EnvName}'
       Parameters: [NATWorkloads,]
+      EnvVersion: v1.42.0
   
   EnvControllerFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Code:
-        S3Bucket:
-        S3Key:
       Handler: "index.handler"
       Timeout: 900
       MemorySize: 512
@@ -302,7 +370,8 @@ Resources:
           - Fn::ImportValue:
               !Sub '${AppName}-${EnvName}-PrivateSubnets'
       SecurityGroups:
-      - !Ref ServiceSecurityGroup
+        - !Ref ServiceSecurityGroup
+        - Fn::ImportValue: !Sub "${AppName}-${EnvName}-EnvironmentSecurityGroup"
       Tags:
         - Key: copilot-application
           Value: !Ref AppName

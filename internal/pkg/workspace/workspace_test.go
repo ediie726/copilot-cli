@@ -31,11 +31,9 @@ func TestWorkspace_Path(t *testing.T) {
 	const workspaceDir = "test"
 
 	testCases := map[string]struct {
-		expectedPath      string
-		presetManifestDir string
-		workingDir        string
-		expectedError     error
-		mockFileSystem    func(fs afero.Fs)
+		expectedPath   string
+		workingDir     string
+		mockFileSystem func(fs afero.Fs)
 	}{
 		"same directory level": {
 			expectedPath: workspaceDir,
@@ -44,7 +42,6 @@ func TestWorkspace_Path(t *testing.T) {
 				fs.MkdirAll("test/copilot", 0755)
 			},
 		},
-
 		"same directory": {
 			expectedPath: workspaceDir,
 			workingDir:   filepath.FromSlash("test/copilot"),
@@ -52,7 +49,6 @@ func TestWorkspace_Path(t *testing.T) {
 				fs.MkdirAll("test/copilot", 0755)
 			},
 		},
-
 		"several levels deep": {
 			expectedPath: workspaceDir,
 			workingDir:   filepath.FromSlash("test/1/2/3/4"),
@@ -61,29 +57,10 @@ func TestWorkspace_Path(t *testing.T) {
 				fs.MkdirAll("test/1/2/3/4", 0755)
 			},
 		},
-
-		"too many levels deep": {
-			expectedError: fmt.Errorf("couldn't find a directory called copilot up to 5 levels up from %s", filepath.FromSlash("test/1/2/3/4/5")),
-			workingDir:    filepath.FromSlash("test/1/2/3/4/5"),
-			mockFileSystem: func(fs afero.Fs) {
-				fs.MkdirAll("test/copilot", 0755)
-				fs.MkdirAll("test/1/2/3/4/5", 0755)
-			},
-		},
-
-		"out of a workspace": {
-			expectedError: fmt.Errorf("couldn't find a directory called copilot up to 5 levels up from %s", filepath.FromSlash("/")),
-			workingDir:    filepath.FromSlash("/"),
-			mockFileSystem: func(fs afero.Fs) {
-				fs.MkdirAll("test/copilot", 0755)
-			},
-		},
-
 		"uses precomputed manifest path": {
-			expectedPath:      workspaceDir,
-			workingDir:        filepath.FromSlash("/"),
-			mockFileSystem:    func(fs afero.Fs) {},
-			presetManifestDir: filepath.FromSlash("test/copilot"),
+			expectedPath:   workspaceDir,
+			workingDir:     filepath.FromSlash("/"),
+			mockFileSystem: func(fs afero.Fs) {},
 		},
 	}
 	for name, tc := range testCases {
@@ -96,48 +73,50 @@ func TestWorkspace_Path(t *testing.T) {
 			ws := Workspace{
 				workingDirAbs: tc.workingDir,
 				fs:            &afero.Afero{Fs: fs},
-				copilotDirAbs: tc.presetManifestDir,
+				CopilotDirAbs: filepath.FromSlash("test/copilot"),
 			}
-			workspacePath, err := ws.Path()
-			if tc.expectedError == nil {
-				require.NoError(t, err)
-				require.Equal(t, tc.expectedPath, workspacePath)
-			} else {
-				require.Equal(t, tc.expectedError.Error(), err.Error())
-			}
+			workspacePath := ws.Path()
+			require.Equal(t, tc.expectedPath, workspacePath)
 		})
 	}
 }
 
 func TestWorkspace_Summary(t *testing.T) {
 	testCases := map[string]struct {
+		workingDir     string
+		mockFileSystem func(fs afero.Fs)
+
 		expectedSummary Summary
-		workingDir      string
 		expectedError   error
-		mockFileSystem  func(fs afero.Fs)
 	}{
 		"existing workspace summary": {
-			expectedSummary: Summary{
-				Application: "DavidsApp",
-				Path:        filepath.FromSlash("test/copilot/.workspace"),
-			},
 			workingDir: "test/",
 			mockFileSystem: func(fs afero.Fs) {
 				fs.MkdirAll("test/copilot", 0755)
 				afero.WriteFile(fs, "test/copilot/.workspace", []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
 			},
+			expectedSummary: Summary{
+				Application: "DavidsApp",
+				Path:        filepath.FromSlash("test/copilot/.workspace"),
+			},
+		},
+		"existing workspace summary in a parent dir": {
+			workingDir: "test/app",
+			mockFileSystem: func(fs afero.Fs) {
+				fs.MkdirAll("test/copilot", 0755)
+				afero.WriteFile(fs, "test/copilot/.workspace", []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
+			},
+			expectedSummary: Summary{
+				Application: "DavidsApp",
+				Path:        filepath.FromSlash("test/copilot/.workspace"),
+			},
 		},
 		"no existing workspace summary": {
-			workingDir:    "test/",
-			expectedError: fmt.Errorf("couldn't find an application associated with this workspace"),
+			workingDir: "test/",
 			mockFileSystem: func(fs afero.Fs) {
 				fs.MkdirAll("test/copilot", 0755)
 			},
-		},
-		"no existing manifest dir": {
-			workingDir:     "test/",
-			expectedError:  fmt.Errorf("couldn't find a directory called copilot up to 5 levels up from test/"),
-			mockFileSystem: func(fs afero.Fs) {},
+			expectedError: &ErrNoAssociatedApplication{},
 		},
 	}
 	for name, tc := range testCases {
@@ -148,6 +127,7 @@ func TestWorkspace_Summary(t *testing.T) {
 			tc.mockFileSystem(fs)
 
 			ws := Workspace{
+				CopilotDirAbs: filepath.Join("test", CopilotDirName),
 				workingDirAbs: tc.workingDir,
 				fs:            &afero.Afero{Fs: fs},
 			}
@@ -163,84 +143,248 @@ func TestWorkspace_Summary(t *testing.T) {
 }
 
 func TestWorkspace_Create(t *testing.T) {
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	parent := filepath.Dir(wd)
 	testCases := map[string]struct {
 		appName        string
-		workingDir     string
-		expectedError  error
-		expectNoWrites bool
-		mockFileSystem func(fs afero.Fs)
+		mockFileSystem func() afero.Fs
+
+		expectedError         error
+		expectedCopilotDirAbs string
 	}{
-		"existing workspace and workspace summary": {
-			workingDir:     "test/",
-			appName:        "DavidsApp",
-			expectNoWrites: true,
-			mockFileSystem: func(fs afero.Fs) {
-				fs.MkdirAll("test/copilot", 0755)
-				afero.WriteFile(fs, "test/copilot/.workspace", []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
+		"successful no-op with existing workspace and summary": {
+			appName: "DavidsApp",
+			mockFileSystem: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				_ = fs.MkdirAll(fmt.Sprintf("%s/copilot", wd), 0755)
+				_ = afero.WriteFile(fs, fmt.Sprintf("%s/copilot/.workspace", wd), []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
+				fs = afero.NewReadOnlyFs(fs) // No write/
+				return fs
 			},
+			expectedCopilotDirAbs: fmt.Sprintf("%s/copilot", wd),
 		},
-		"existing workspace and workspace summary in different directory": {
-			workingDir:     "test/app/",
-			appName:        "DavidsApp",
-			expectNoWrites: true,
-			mockFileSystem: func(fs afero.Fs) {
-				fs.MkdirAll("test/copilot", 0755)
-				fs.MkdirAll("test/app", 0755)
-				afero.WriteFile(fs, "test/copilot/.workspace", []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
+		"successful no-op with existing workspace and summary in a parent directory": {
+			appName: "DavidsApp",
+			mockFileSystem: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				_ = fs.MkdirAll(fmt.Sprintf("%s/copilot", parent), 0755)
+				_ = afero.WriteFile(fs, fmt.Sprintf("%s/copilot/.workspace", parent), []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
+				fs = afero.NewReadOnlyFs(fs) // No write.
+				return fs
 			},
+			expectedCopilotDirAbs: fmt.Sprintf("%s/copilot", parent),
 		},
-		"existing workspace and different application": {
-			workingDir:    "test/",
-			appName:       "DavidsApp",
+		"error if workspace exists but associated with different application": {
+			appName: "DavidsApp",
+			mockFileSystem: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				_ = fs.MkdirAll(fmt.Sprintf("%s/copilot", wd), 0755)
+				_ = afero.WriteFile(fs, fmt.Sprintf("%s/copilot/.workspace", wd), []byte(fmt.Sprintf("---\napplication: %s", "DavidsOtherApp")), 0644)
+				fs = afero.NewReadOnlyFs(fs) // No write.
+				return fs
+			},
 			expectedError: fmt.Errorf("workspace is already registered with application DavidsOtherApp under %s", filepath.FromSlash("copilot/.workspace")),
-			mockFileSystem: func(fs afero.Fs) {
-				fs.MkdirAll("test/copilot", 0755)
-				afero.WriteFile(fs, "test/copilot/.workspace", []byte(fmt.Sprintf("---\napplication: %s", "DavidsOtherApp")), 0644)
-			},
 		},
-		"existing workspace but no workspace summary": {
-			workingDir: "test/",
-			appName:    "DavidsApp",
-			mockFileSystem: func(appFS afero.Fs) {
-				appFS.MkdirAll("test/copilot", 0755)
+		"successfully create a work summary if workspace existing but no workspace summary": {
+			appName: "DavidsApp",
+			mockFileSystem: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				_ = fs.MkdirAll(fmt.Sprintf("%s/copilot", wd), 0755)
+				return fs
 			},
+			expectedCopilotDirAbs: fmt.Sprintf("%s/copilot", wd),
 		},
-		"no existing workspace or workspace summary": {
-			workingDir:     "test/",
-			appName:        "DavidsApp",
-			mockFileSystem: func(fs afero.Fs) {},
+		"successfully create both workspace and summary if neither exists": {
+			appName: "DavidsApp",
+			mockFileSystem: func() afero.Fs {
+				return afero.NewMemMapFs()
+			},
+			expectedCopilotDirAbs: fmt.Sprintf("%s/copilot", wd),
 		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			// Create an empty FileSystem
-			fs := afero.NewMemMapFs()
-			// Set it up
-			tc.mockFileSystem(fs)
-			// Throw an error if someone tries to write
-			// if we expect there to be no writes.
-			if tc.expectNoWrites {
-				fs = afero.NewReadOnlyFs(fs)
-			}
-
-			ws := Workspace{
-				workingDirAbs: tc.workingDir,
-				fs:            &afero.Afero{Fs: fs},
-			}
-			err := ws.Create(tc.appName)
+			// Set up filesystem.
+			gotWS, err := Create(tc.appName, tc.mockFileSystem())
 			if tc.expectedError == nil {
 				// an operation not permitted error means
 				// we tried to write to the filesystem, but
 				// the test indicated that we expected no writes.
 				require.NoError(t, err)
-				summary, err := ws.Summary()
+
+				// Validate that the stored copilot dir path is correct.
+				require.Equal(t, tc.expectedCopilotDirAbs, gotWS.CopilotDirAbs)
+
+				// Validate that the workspace dir is created.
+				exist, err := gotWS.fs.Exists(tc.expectedCopilotDirAbs)
 				require.NoError(t, err)
-				require.Equal(t, tc.appName, summary.Application)
+				require.True(t, exist)
+
+				// Validate that the summary file is associated with the app.
+				gotSummary, err := gotWS.Summary()
+				require.NoError(t, err)
+				require.Equal(t, tc.appName, gotSummary.Application)
+
 			} else {
 				require.Equal(t, tc.expectedError.Error(), err.Error())
 			}
 		})
 	}
+}
+
+func TestWorkspace_Use(t *testing.T) {
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	parent := filepath.Dir(wd)
+	testCases := map[string]struct {
+		appName        string
+		mockFileSystem func() afero.Fs
+
+		expectedError         error
+		expectedCopilotDirAbs string
+	}{
+		"returns the existing workspace that has the summary": {
+			appName: "DavidsApp",
+			mockFileSystem: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				_ = fs.MkdirAll(fmt.Sprintf("%s/copilot", wd), 0755)
+				_ = afero.WriteFile(fs, fmt.Sprintf("%s/copilot/.workspace", wd), []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
+				fs = afero.NewReadOnlyFs(fs) // No write/
+				return fs
+			},
+			expectedCopilotDirAbs: fmt.Sprintf("%s/copilot", wd),
+		},
+		"returns the existing workspace and workspace summary in a parent directory": {
+			appName: "DavidsApp",
+			mockFileSystem: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				_ = fs.MkdirAll(fmt.Sprintf("%s/copilot", parent), 0755)
+				_ = afero.WriteFile(fs, fmt.Sprintf("%s/copilot/.workspace", parent), []byte(fmt.Sprintf("---\napplication: %s", "DavidsApp")), 0644)
+				fs = afero.NewReadOnlyFs(fs) // No write.
+				return fs
+			},
+			expectedCopilotDirAbs: fmt.Sprintf("%s/copilot", parent),
+		},
+		"returns an ErrNoAssociatedApplication error when there is existing copilot/ directory that does not have a workspace summary": {
+			appName: "DavidsApp",
+			mockFileSystem: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				_ = fs.MkdirAll(fmt.Sprintf("%s/copilot", wd), 0755)
+				return fs
+			},
+			expectedCopilotDirAbs: fmt.Sprintf("%s/copilot", wd),
+			expectedError:         &ErrNoAssociatedApplication{},
+		},
+		"ErrWorkspaceNotFound if there is no workspace": {
+			mockFileSystem: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				_ = fs.MkdirAll(fmt.Sprintf("%s/webhook", wd), 0755)
+				return fs
+			},
+			expectedError: &ErrWorkspaceNotFound{
+				&ErrTargetNotFound{
+					startDir:              wd,
+					numberOfLevelsChecked: maximumParentDirsToSearch,
+				},
+				CopilotDirName,
+			},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			// Set up filesystem.
+			gotWS, err := Use(tc.mockFileSystem())
+			if tc.expectedError == nil {
+				// an operation not permitted error means
+				// we tried to write to the filesystem, but
+				// the test indicated that we expected no writes.
+				require.NoError(t, err)
+
+				// Validate that the stored copilot dir path is correct.
+				require.Equal(t, tc.expectedCopilotDirAbs, gotWS.CopilotDirAbs)
+
+				// Validate that the workspace dir is there.
+				exist, err := gotWS.fs.Exists(tc.expectedCopilotDirAbs)
+				require.NoError(t, err)
+				require.True(t, exist)
+
+			} else {
+				require.Equal(t, tc.expectedError.Error(), err.Error())
+			}
+		})
+	}
+}
+
+func TestWorkspace_WorkloadExists(t *testing.T) {
+	t.Run("returns true if workload exists in the workspace", func(t *testing.T) {
+		fs := afero.NewMemMapFs()
+		_, _ = fs.Create("/copilot/api/manifest.yml")
+		ws := &Workspace{
+			CopilotDirAbs: "/copilot",
+			fs: &afero.Afero{
+				Fs: fs,
+			},
+		}
+		got, err := ws.WorkloadExists("api")
+		require.NoError(t, err)
+		require.True(t, got)
+	})
+
+	t.Run("returns false if workload does not in the workspace", func(t *testing.T) {
+		fs := afero.NewMemMapFs()
+		_, _ = fs.Create("a/copilot/api/manifest.yml")
+		ws := &Workspace{
+			CopilotDirAbs: "b/copilot",
+			fs: &afero.Afero{
+				Fs: fs,
+			},
+		}
+		got, err := ws.WorkloadExists("api")
+		require.NoError(t, err)
+		require.False(t, got)
+	})
+}
+
+func TestWorkspace_EnvironmentsExist(t *testing.T) {
+	t.Run("returns true if environments are managed in the workspace", func(t *testing.T) {
+		// GIVEN
+		defer func() { getWd = os.Getwd }()
+
+		getWd = func() (dir string, err error) {
+			return "/copilot", nil
+		}
+		fs := afero.NewMemMapFs()
+		_, _ = fs.Create("/copilot/environments/")
+		_, _ = fs.Create("/copilot/.workspace")
+		ws, err := Use(fs)
+
+		// Then
+		require.NoError(t, err)
+		got, err := ws.HasEnvironments()
+		require.NoError(t, err)
+		require.True(t, got)
+	})
+
+	t.Run("returns false if environments are not managed in the workspace", func(t *testing.T) {
+		// GIVEN
+		defer func() { getWd = os.Getwd }()
+
+		getWd = func() (dir string, err error) {
+			return "b/copilot", nil
+		}
+		fs := afero.NewMemMapFs()
+		_, _ = fs.Create("b/copilot/.workspace")
+		_, _ = fs.Create("a/copilot/environments/")
+		_, _ = fs.Create("a/copilot/.workspace")
+		ws, err := Use(fs)
+
+		// Then
+		require.NoError(t, err)
+		got, err := ws.HasEnvironments()
+		require.NoError(t, err)
+		require.False(t, got)
+	})
 }
 
 func TestWorkspace_ListServices(t *testing.T) {
@@ -340,7 +484,7 @@ type: Load Balanced Web Service`))
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			ws := &Workspace{
-				copilotDirAbs: tc.copilotDir,
+				CopilotDirAbs: tc.copilotDir,
 				fs: &afero.Afero{
 					Fs: tc.fs(),
 				},
@@ -434,7 +578,7 @@ type: Load Balanced Web Service`))
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			ws := &Workspace{
-				copilotDirAbs: tc.copilotDir,
+				CopilotDirAbs: tc.copilotDir,
 				fs: &afero.Afero{
 					Fs: tc.fs(),
 				},
@@ -496,7 +640,7 @@ type: Scheduled Job`))
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			ws := &Workspace{
-				copilotDirAbs: tc.copilotDir,
+				CopilotDirAbs: tc.copilotDir,
 				fs: &afero.Afero{
 					Fs: tc.fs(),
 				},
@@ -563,7 +707,7 @@ func TestWorkspace_ListEnvironments(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			ws := &Workspace{
-				copilotDirAbs: tc.copilotDir,
+				CopilotDirAbs: tc.copilotDir,
 				fs: &afero.Afero{
 					Fs: tc.fs(),
 				},
@@ -754,18 +898,6 @@ version: 1
 			wantedLog: fmt.Sprintf("Unable to read pipeline manifest at '%s': unmarshal pipeline manifest: yaml: unmarshal errors:\n  line 3: cannot unmarshal !!str `invalid...` into manifest.PipelineSchemaMajorVersion\n",
 				filepath.FromSlash("/copilot/pipelines/beta/manifest.yml")),
 		},
-		"handles missing copilot directory error": {
-			copilotDir: "",
-			fs: func() afero.Fs {
-				fs := afero.NewMemMapFs()
-				return fs
-			},
-			wantedPipelines: nil,
-			wantedErr: &ErrWorkspaceNotFound{
-				ManifestDirectoryName: CopilotDirName,
-				NumberOfLevelsChecked: maximumParentDirsToSearch,
-			},
-		},
 	}
 
 	for name, tc := range testCases {
@@ -776,7 +908,7 @@ version: 1
 
 		t.Run(name, func(t *testing.T) {
 			ws := &Workspace{
-				copilotDirAbs: tc.copilotDir,
+				CopilotDirAbs: tc.copilotDir,
 				fs: &afero.Afero{
 					Fs: tc.fs(),
 				},
@@ -828,21 +960,191 @@ func TestIsInGitRepository(t *testing.T) {
 	}
 }
 
-func TestWorkspace_ReadAddonsDir(t *testing.T) {
+func TestWorkspace_EnvAddonsAbsPath(t *testing.T) {
+	mockWorkingDirAbs := "/app"
 	testCases := map[string]struct {
-		svcName        string
-		copilotDirPath string
-		fs             func() afero.Fs
+		fs         func() afero.Fs
+		wantedPath string
+	}{
+		"returns the correct env addons path": {
+			fs: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				fs.MkdirAll("/copilot/environments/addons/", 0755)
+				return fs
+			},
+			wantedPath: "/copilot/environments/addons",
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ws := &Workspace{
+				CopilotDirAbs: "/copilot/",
+				workingDirAbs: mockWorkingDirAbs,
+				fs: &afero.Afero{
+					Fs: tc.fs(),
+				},
+			}
+
+			got := ws.EnvAddonsAbsPath()
+			require.Equal(t, tc.wantedPath, got)
+		})
+	}
+}
+
+func TestWorkspace_WorkloadAddonFilePath(t *testing.T) {
+	ws := &Workspace{}
+	require.Equal(t, filepath.FromSlash("webhook/addons/db.yml"), ws.WorkloadAddonFilePath("webhook", "db.yml"))
+}
+
+func TestWorkspace_EnvAddonFilePath(t *testing.T) {
+	ws := &Workspace{}
+	require.Equal(t, filepath.FromSlash("environments/addons/db.yml"), ws.EnvAddonFilePath("db.yml"))
+}
+
+func TestWorkspace_EnvOverridesPath(t *testing.T) {
+	// GIVEN
+	defer func() { getWd = os.Getwd }()
+
+	getWd = func() (dir string, err error) {
+		return ".", nil
+	}
+	fs := afero.NewMemMapFs()
+	ws, err := Create("demo", fs)
+
+	// THEN
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join("copilot", "environments", "overrides"), ws.EnvOverridesPath())
+}
+
+func TestWorkspace_WorkloadOverridesPath(t *testing.T) {
+	// GIVEN
+	defer func() { getWd = os.Getwd }()
+
+	getWd = func() (dir string, err error) {
+		return ".", nil
+	}
+	fs := afero.NewMemMapFs()
+	ws, err := Create("demo", fs)
+
+	// THEN
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join("copilot", "frontend", "overrides"), ws.WorkloadOverridesPath("frontend"))
+}
+
+func TestWorkspace_EnvAddonFileAbsPath(t *testing.T) {
+	mockWorkingDirAbs := "/app"
+	testCases := map[string]struct {
+		fName      string
+		fs         func() afero.Fs
+		wantedPath string
+		wantedErr  error
+	}{
+		"returns the correct env addon file path": {
+			fName: "db.yml",
+			fs: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				fs.MkdirAll("/copilot/environments/addons/db.yml", 0755)
+				return fs
+			},
+			wantedPath: "/copilot/environments/addons/db.yml",
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ws := &Workspace{
+				CopilotDirAbs: "/copilot",
+				workingDirAbs: mockWorkingDirAbs,
+				fs: &afero.Afero{
+					Fs: tc.fs(),
+				},
+			}
+
+			got := ws.EnvAddonFileAbsPath(tc.fName)
+			require.Equal(t, tc.wantedPath, got)
+		})
+	}
+}
+
+func TestWorkspace_WorkloadAddonsAbsPath(t *testing.T) {
+	mockWorkingDirAbs := "/app"
+	testCases := map[string]struct {
+		fs         func() afero.Fs
+		wantedPath string
+	}{
+		"returns the correct workload addons path": {
+			fs: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				fs.MkdirAll("/copilot/mockSvc/addons/", 0755)
+				return fs
+			},
+			wantedPath: "/copilot/mockSvc/addons",
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ws := &Workspace{
+				CopilotDirAbs: "/copilot/",
+				workingDirAbs: mockWorkingDirAbs,
+				fs: &afero.Afero{
+					Fs: tc.fs(),
+				},
+			}
+
+			got := ws.WorkloadAddonsAbsPath("mockSvc")
+			require.Equal(t, tc.wantedPath, got)
+		})
+	}
+}
+
+func TestWorkspace_WorkloadAddonFileAbsPath(t *testing.T) {
+	mockWorkingDirAbs := "/app"
+	testCases := map[string]struct {
+		svc        string
+		fName      string
+		fs         func() afero.Fs
+		wantedPath string
+		wantedErr  error
+	}{
+		"returns the correct env addon file path": {
+			svc:   "webhook",
+			fName: "db.yml",
+			fs: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				fs.MkdirAll("/copilot/webhook/addons/db.yml", 0755)
+				return fs
+			},
+			wantedPath: "/copilot/webhook/addons/db.yml",
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ws := &Workspace{
+				CopilotDirAbs: "/copilot/",
+				workingDirAbs: mockWorkingDirAbs,
+				fs: &afero.Afero{
+					Fs: tc.fs(),
+				},
+			}
+
+			got := ws.WorkloadAddonFileAbsPath(tc.svc, tc.fName)
+			require.Equal(t, tc.wantedPath, got)
+		})
+	}
+}
+
+func TestWorkspace_ListFiles(t *testing.T) {
+	testCases := map[string]struct {
+		inDirPath string
+		fs        func() afero.Fs
 
 		wantedFileNames []string
 		wantedErr       error
 	}{
 		"dir not exist": {
-			svcName:        "webhook",
-			copilotDirPath: "/copilot",
+			inDirPath: "/copilot/webhook/addons",
 			fs: func() afero.Fs {
 				fs := afero.NewMemMapFs()
-				fs.MkdirAll("/copilot/webhook", 0755)
+				fs.MkdirAll("/copilot/webhook/", 0755)
 				return fs
 			},
 			wantedErr: &os.PathError{
@@ -852,8 +1154,7 @@ func TestWorkspace_ReadAddonsDir(t *testing.T) {
 			},
 		},
 		"retrieves file names": {
-			svcName:        "webhook",
-			copilotDirPath: "/copilot",
+			inDirPath: "/copilot/webhook/addons",
 			fs: func() afero.Fs {
 				fs := afero.NewMemMapFs()
 				fs.MkdirAll("/copilot/webhook/addons", 0755)
@@ -871,14 +1172,14 @@ func TestWorkspace_ReadAddonsDir(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// GIVEN
 			ws := &Workspace{
-				copilotDirAbs: tc.copilotDirPath,
+				CopilotDirAbs: "copilot/",
 				fs: &afero.Afero{
 					Fs: tc.fs(),
 				},
 			}
 
 			// WHEN
-			actualFileNames, actualErr := ws.ReadAddonsDir(tc.svcName)
+			actualFileNames, actualErr := ws.ListFiles(tc.inDirPath)
 
 			// THEN
 			require.Equal(t, tc.wantedErr, actualErr)
@@ -887,11 +1188,60 @@ func TestWorkspace_ReadAddonsDir(t *testing.T) {
 	}
 }
 
-func TestWorkspace_WriteAddon(t *testing.T) {
+func TestWorkspace_ReadFile(t *testing.T) {
 	testCases := map[string]struct {
-		marshaler   mockBinaryMarshaler
-		svc         string
-		storageName string
+		fPath string
+		fs    func() afero.Fs
+
+		wantedData []byte
+		wantedErr  error
+	}{
+		"return error if file does not exist": {
+			fPath: "/copilot/api/addons/db.yml",
+			fs: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				return fs
+			},
+			wantedErr: fmt.Errorf("file %s does not exists", filepath.FromSlash("/copilot/api/addons/db.yml")),
+		},
+		"read existing file": {
+			fPath: "/copilot/environments/addons/db.yml",
+			fs: func() afero.Fs {
+				fs := afero.NewMemMapFs()
+				fs.MkdirAll("/copilot/environments/addons", 0755)
+				f, _ := fs.Create("/copilot/environments/addons/db.yml")
+				defer f.Close()
+				f.Write([]byte("mydb"))
+				return fs
+			},
+
+			wantedData: []byte("mydb"),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ws := &Workspace{
+				CopilotDirAbs: "/copilot",
+				fs: &afero.Afero{
+					Fs: tc.fs(),
+				},
+			}
+			data, err := ws.ReadFile(tc.fPath)
+			if tc.wantedErr == nil {
+				require.NoError(t, err)
+				require.Equal(t, tc.wantedData, data)
+			} else {
+				require.EqualError(t, err, tc.wantedErr.Error())
+			}
+		})
+	}
+}
+
+func TestWorkspace_Write(t *testing.T) {
+	testCases := map[string]struct {
+		marshaler mockBinaryMarshaler
+		path      string
 
 		wantedPath string
 		wantedErr  error
@@ -900,19 +1250,15 @@ func TestWorkspace_WriteAddon(t *testing.T) {
 			marshaler: mockBinaryMarshaler{
 				content: []byte("hello"),
 			},
-			svc:         "webhook",
-			storageName: "s3",
-
+			path:       filepath.FromSlash("webhook/addons/s3.yml"),
 			wantedPath: filepath.FromSlash("/copilot/webhook/addons/s3.yml"),
 		},
 		"wraps error if cannot marshal to binary": {
 			marshaler: mockBinaryMarshaler{
 				err: errors.New("some error"),
 			},
-			svc:         "webhook",
-			storageName: "s3",
-
-			wantedErr: errors.New("marshal binary addon content: some error"),
+			path:      filepath.FromSlash("webhook/addons/s3.yml"),
+			wantedErr: errors.New("marshal binary content: some error"),
 		},
 	}
 
@@ -923,15 +1269,15 @@ func TestWorkspace_WriteAddon(t *testing.T) {
 			utils := &afero.Afero{
 				Fs: fs,
 			}
-			utils.MkdirAll(filepath.Join("/", "copilot", tc.svc), 0755)
+			utils.MkdirAll(filepath.Join("/", "copilot", "webhook"), 0755)
 			ws := &Workspace{
 				workingDirAbs: "/",
-				copilotDirAbs: "/copilot",
+				CopilotDirAbs: "/copilot",
 				fs:            utils,
 			}
 
 			// WHEN
-			actualPath, actualErr := ws.WriteAddon(tc.marshaler, tc.svc, tc.storageName)
+			actualPath, actualErr := ws.Write(tc.marshaler, tc.path)
 
 			// THEN
 			if tc.wantedErr != nil {
@@ -1008,7 +1354,7 @@ flavor: vanilla`),
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			ws := &Workspace{
-				copilotDirAbs: mockCopilotDir,
+				CopilotDirAbs: mockCopilotDir,
 				fs: &afero.Afero{
 					Fs: tc.mockFS(),
 				},
@@ -1101,7 +1447,7 @@ flavor: vanilla`),
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			ws := &Workspace{
-				copilotDirAbs: "/copilot",
+				CopilotDirAbs: "/copilot",
 				fs: &afero.Afero{
 					Fs: tc.mockFS(),
 				},
@@ -1171,7 +1517,7 @@ version: 0
 			// GIVEN
 			fs := tc.fs()
 			ws := &Workspace{
-				copilotDirAbs: copilotDir,
+				CopilotDirAbs: copilotDir,
 				fs:            &afero.Afero{Fs: fs},
 			}
 
@@ -1194,11 +1540,11 @@ func TestWorkspace_DeleteWorkspaceFile(t *testing.T) {
 		fs         func() afero.Fs
 	}{
 		".workspace should be deleted": {
-			copilotDir: "copilot",
+			copilotDir: "/path/to/copilot",
 			fs: func() afero.Fs {
 				fs := afero.NewMemMapFs()
-				fs.MkdirAll("/copilot", 0755)
-				fs.Create("/copilot/.workspace")
+				fs.MkdirAll("/path/to/copilot", 0755)
+				fs.Create("/path/to/copilot/.workspace")
 				return fs
 			},
 		},
@@ -1210,13 +1556,11 @@ func TestWorkspace_DeleteWorkspaceFile(t *testing.T) {
 			// GIVEN
 			fs := tc.fs()
 			ws := &Workspace{
-				copilotDirAbs: tc.copilotDir,
+				CopilotDirAbs: tc.copilotDir,
 				fs: &afero.Afero{
 					Fs: fs,
 				},
 			}
-			ws.fs.MkdirAll("copilot", 0755)
-			ws.fs.Create(tc.copilotDir + "/" + ".workspace")
 
 			// WHEN
 			err := ws.DeleteWorkspaceFile()
@@ -1225,7 +1569,7 @@ func TestWorkspace_DeleteWorkspaceFile(t *testing.T) {
 			require.NoError(t, err)
 
 			// There should be no more .workspace file under the copilot/ directory.
-			path := filepath.Join(tc.copilotDir, "/.workspace")
+			path := filepath.Join(tc.copilotDir, ".workspace")
 			_, existErr := fs.Stat(path)
 			expectedErr := &os.PathError{
 				Op:   "open",
@@ -1233,81 +1577,6 @@ func TestWorkspace_DeleteWorkspaceFile(t *testing.T) {
 				Err:  os.ErrNotExist,
 			}
 			require.EqualError(t, existErr, expectedErr.Error())
-		})
-	}
-}
-
-func TestWorkspace_ListDockerfiles(t *testing.T) {
-	wantedDockerfiles := []string{"./Dockerfile", "backend/Dockerfile", "frontend/Dockerfile"}
-	testCases := map[string]struct {
-		mockFileSystem func(mockFS afero.Fs)
-		err            error
-		dockerfiles    []string
-	}{
-		"find Dockerfiles": {
-			mockFileSystem: func(mockFS afero.Fs) {
-				mockFS.MkdirAll("frontend", 0755)
-				mockFS.MkdirAll("backend", 0755)
-
-				afero.WriteFile(mockFS, "Dockerfile", []byte("FROM nginx"), 0644)
-				afero.WriteFile(mockFS, "frontend/Dockerfile", []byte("FROM nginx"), 0644)
-				afero.WriteFile(mockFS, "backend/Dockerfile", []byte("FROM nginx"), 0644)
-			},
-			err:         nil,
-			dockerfiles: wantedDockerfiles,
-		},
-		"exclude dockerignore files": {
-			mockFileSystem: func(mockFS afero.Fs) {
-				mockFS.MkdirAll("frontend", 0755)
-				mockFS.MkdirAll("backend", 0755)
-
-				afero.WriteFile(mockFS, "Dockerfile", []byte("FROM nginx"), 0644)
-				afero.WriteFile(mockFS, "frontend/Dockerfile", []byte("FROM nginx"), 0644)
-				afero.WriteFile(mockFS, "frontend/Dockerfile.dockerignore", []byte("*/temp*"), 0644)
-				afero.WriteFile(mockFS, "backend/Dockerfile", []byte("FROM nginx"), 0644)
-				afero.WriteFile(mockFS, "backend/Dockerfile.dockerignore", []byte("*/temp*"), 0644)
-			},
-			err:         nil,
-			dockerfiles: wantedDockerfiles,
-		},
-		"nonstandard Dockerfile names": {
-			mockFileSystem: func(mockFS afero.Fs) {
-				mockFS.MkdirAll("frontend", 0755)
-				mockFS.MkdirAll("dockerfiles", 0755)
-				afero.WriteFile(mockFS, "Dockerfile", []byte("FROM nginx"), 0644)
-				afero.WriteFile(mockFS, "frontend/dockerfile", []byte("FROM nginx"), 0644)
-				afero.WriteFile(mockFS, "Job.dockerfile", []byte("FROM nginx"), 0644)
-				afero.WriteFile(mockFS, "Job.dockerfile.dockerignore", []byte("*/temp*"), 0644)
-			},
-			err:         nil,
-			dockerfiles: []string{"./Dockerfile", "./Job.dockerfile", "frontend/dockerfile"},
-		},
-		"no Dockerfiles": {
-			mockFileSystem: func(mockFS afero.Fs) {},
-			dockerfiles:    []string{},
-		},
-	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			// GIVEN
-			fs := &afero.Afero{Fs: afero.NewMemMapFs()}
-			tc.mockFileSystem(fs)
-			ws := &Workspace{
-				workingDirAbs: "/",
-				copilotDirAbs: "copilot",
-				fs: &afero.Afero{
-					Fs: fs,
-				},
-			}
-			got, err := ws.ListDockerfiles()
-
-			if tc.err != nil {
-				require.EqualError(t, err, tc.err.Error())
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, tc.dockerfiles, got)
-			}
 		})
 	}
 }
@@ -1353,7 +1622,7 @@ func TestWorkspace_read(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			ws := &Workspace{
-				copilotDirAbs: tc.copilotDir,
+				CopilotDirAbs: tc.copilotDir,
 				fs: &afero.Afero{
 					Fs: tc.fs(),
 				},
@@ -1403,7 +1672,7 @@ func TestWorkspace_write(t *testing.T) {
 			utils.WriteFile("/copilot/manifest.yml", []byte{}, 0644)
 			ws := &Workspace{
 				workingDirAbs: "/",
-				copilotDirAbs: "/copilot",
+				CopilotDirAbs: "/copilot",
 				fs:            utils,
 			}
 

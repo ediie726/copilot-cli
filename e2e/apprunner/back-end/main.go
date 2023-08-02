@@ -4,33 +4,30 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"net/http"
-
-	"github.com/julienschmidt/httprouter"
 )
 
-var message = "hello world"
-
-// HealthCheck just returns true if the service is up.
-func HealthCheck(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+// HealthCheck returns a 200.
+func HealthCheck(w http.ResponseWriter, req *http.Request) {
 	log.Println("🚑 healthcheck ok!")
 	w.WriteHeader(http.StatusOK)
 }
 
-// ServiceDiscoveryGet just returns true no matter what
-func ServiceDiscoveryGet(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	log.Printf("Get on ServiceDiscovery endpoint Succeeded with message %s\n", message)
+// HelloWorld writes a hello world message.
+func HelloWorld(w http.ResponseWriter, req *http.Request) {
+	log.Printf("Received request to %s", req.URL.Path)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(message))
+	w.Write([]byte("hello-world"))
 }
 
 func main() {
-	router := httprouter.New()
-	router.GET("/service-discovery/", ServiceDiscoveryGet)
+	http.Handle("/", http.HandlerFunc(HealthCheck))
+	http.Handle("/hello-world", http.HandlerFunc(HelloWorld))
 
-	// Health Check
-	router.GET("/", HealthCheck)
-
-	log.Fatal(http.ListenAndServe(":80", router))
+	err := http.ListenAndServe(":80", nil)
+	if !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("listen and serve: %s", err)
+	}
 }

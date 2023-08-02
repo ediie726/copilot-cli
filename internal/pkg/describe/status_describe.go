@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"sort"
 
+	awsS3 "github.com/aws/copilot-cli/internal/pkg/aws/s3"
+	"github.com/aws/copilot-cli/internal/pkg/s3"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/copilot-cli/internal/pkg/aws/aas"
 	"github.com/aws/copilot-cli/internal/pkg/aws/cloudwatch"
@@ -18,7 +21,11 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/ecs"
 )
 
-const fmtAppRunnerSvcLogGroupName = "/aws/apprunner/%s/%s/service"
+const (
+	fmtAppRunnerSvcLogGroupName = "/aws/apprunner/%s/%s/service"
+	autoscalingAlarmType        = "Auto Scaling"
+	rollbackAlarmType           = "Rollback"
+)
 
 type targetHealthGetter interface {
 	TargetsHealth(targetGroupARN string) ([]*elbv2.TargetHealth, error)
@@ -26,7 +33,7 @@ type targetHealthGetter interface {
 
 type alarmStatusGetter interface {
 	AlarmsWithTags(tags map[string]string) ([]cloudwatch.AlarmStatus, error)
-	AlarmStatus(alarms []string) ([]cloudwatch.AlarmStatus, error)
+	AlarmStatuses(...cloudwatch.DescribeAlarmOpts) ([]cloudwatch.AlarmStatus, error)
 }
 
 type logGetter interface {
@@ -67,6 +74,14 @@ type appRunnerStatusDescriber struct {
 	eventsGetter logGetter
 }
 
+type staticSiteStatusDescriber struct {
+	app string
+	env string
+	svc string
+
+	initS3Client func(string) (bucketDataGetter, bucketNameGetter, error)
+}
+
 // NewServiceStatusConfig contains fields that initiates ServiceStatus struct.
 type NewServiceStatusConfig struct {
 	App         string
@@ -99,12 +114,12 @@ func NewECSStatusDescriber(opt *NewServiceStatusConfig) (*ecsStatusDescriber, er
 
 // NewAppRunnerStatusDescriber instantiates a new appRunnerStatusDescriber struct.
 func NewAppRunnerStatusDescriber(opt *NewServiceStatusConfig) (*appRunnerStatusDescriber, error) {
-	ecsSvcDescriber, err := newAppRunnerServiceDescriber(NewServiceConfig{
-		App: opt.App,
-		Svc: opt.Svc,
-
+	appRunnerSvcDescriber, err := newAppRunnerServiceDescriber(NewServiceConfig{
+		App:         opt.App,
+		Env:         opt.Env,
+		Svc:         opt.Svc,
 		ConfigStore: opt.ConfigStore,
-	}, opt.Env)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -113,12 +128,33 @@ func NewAppRunnerStatusDescriber(opt *NewServiceStatusConfig) (*appRunnerStatusD
 		app:          opt.App,
 		env:          opt.Env,
 		svc:          opt.Svc,
-		svcDescriber: ecsSvcDescriber,
-		eventsGetter: cloudwatchlogs.New(ecsSvcDescriber.sess),
+		svcDescriber: appRunnerSvcDescriber,
+		eventsGetter: cloudwatchlogs.New(appRunnerSvcDescriber.sess),
 	}, nil
 }
 
-// Describe returns status of an ECS service.
+// NewStaticSiteStatusDescriber instantiates a new staticSiteStatusDescriber struct.
+func NewStaticSiteStatusDescriber(opt *NewServiceStatusConfig) (*staticSiteStatusDescriber, error) {
+	describer := &staticSiteStatusDescriber{
+		app: opt.App,
+		env: opt.Env,
+		svc: opt.Svc,
+	}
+	describer.initS3Client = func(env string) (bucketDataGetter, bucketNameGetter, error) {
+		environment, err := opt.ConfigStore.GetEnvironment(opt.App, env)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get environment %s: %w", env, err)
+		}
+		sess, err := sessions.ImmutableProvider().FromRole(environment.ManagerRoleARN, environment.Region)
+		if err != nil {
+			return nil, nil, err
+		}
+		return awsS3.New(sess), s3.New(sess), nil
+	}
+	return describer, nil
+}
+
+// Describe returns the status of an ECS service.
 func (s *ecsStatusDescriber) Describe() (HumanJSONStringer, error) {
 	svcDesc, err := s.svcDescriber.DescribeService(s.app, s.env, s.svc)
 	if err != nil {
@@ -146,8 +182,8 @@ func (s *ecsStatusDescriber) Describe() (HumanJSONStringer, error) {
 		}
 		stoppedTaskStatus = append(stoppedTaskStatus, *status)
 	}
-
-	var alarms []cloudwatch.AlarmStatus
+	// Using a map then converting it to a slice to avoid duplication.
+	alarms := make(map[string]cloudwatch.AlarmStatus)
 	taggedAlarms, err := s.cwSvcGetter.AlarmsWithTags(map[string]string{
 		deploy.AppTagKey:     s.app,
 		deploy.EnvTagKey:     s.env,
@@ -156,13 +192,32 @@ func (s *ecsStatusDescriber) Describe() (HumanJSONStringer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get tagged CloudWatch alarms: %w", err)
 	}
-	alarms = append(alarms, taggedAlarms...)
+	for _, alarm := range taggedAlarms {
+		alarms[alarm.Name] = alarm
+	}
 	autoscalingAlarms, err := s.ecsServiceAutoscalingAlarms(svcDesc.ClusterName, svcDesc.Name)
 	if err != nil {
 		return nil, err
 	}
-	alarms = append(alarms, autoscalingAlarms...)
-
+	for _, alarm := range autoscalingAlarms {
+		alarms[alarm.Name] = alarm
+	}
+	rollbackAlarms, err := s.ecsServiceRollbackAlarms(s.app, s.env, s.svc)
+	if err != nil {
+		return nil, err
+	}
+	for _, alarm := range rollbackAlarms {
+		alarms[alarm.Name] = alarm
+	}
+	alarmList := make([]cloudwatch.AlarmStatus, len(alarms))
+	var i int
+	for _, v := range alarms {
+		alarmList[i] = v
+		i++
+	}
+	// Sort by alarm type, then alarm name within type categories.
+	sort.SliceStable(alarmList, func(i, j int) bool { return alarmList[i].Name < alarmList[j].Name })
+	sort.SliceStable(alarmList, func(i, j int) bool { return alarmList[i].Type < alarmList[j].Type })
 	var tasksTargetHealth []taskTargetHealth
 	targetGroupsARN := service.TargetGroups()
 	for _, groupARN := range targetGroupsARN {
@@ -182,29 +237,17 @@ func (s *ecsStatusDescriber) Describe() (HumanJSONStringer, error) {
 	return &ecsServiceStatus{
 		Service:                  service.ServiceStatus(),
 		DesiredRunningTasks:      taskStatus,
-		Alarms:                   alarms,
+		Alarms:                   alarmList,
 		StoppedTasks:             stoppedTaskStatus,
 		TargetHealthDescriptions: tasksTargetHealth,
 	}, nil
 }
 
-func (s *ecsStatusDescriber) ecsServiceAutoscalingAlarms(cluster, service string) ([]cloudwatch.AlarmStatus, error) {
-	alarmNames, err := s.aasSvcGetter.ECSServiceAlarmNames(cluster, service)
-	if err != nil {
-		return nil, fmt.Errorf("retrieve auto scaling alarm names for ECS service %s/%s: %w", cluster, service, err)
-	}
-	alarms, err := s.cwSvcGetter.AlarmStatus(alarmNames)
-	if err != nil {
-		return nil, fmt.Errorf("get auto scaling CloudWatch alarms: %w", err)
-	}
-	return alarms, nil
-}
-
-// Describe returns status of an AppRunner service.
+// Describe returns the status of an AppRunner service.
 func (a *appRunnerStatusDescriber) Describe() (HumanJSONStringer, error) {
 	svc, err := a.svcDescriber.Service()
 	if err != nil {
-		return nil, fmt.Errorf("get AppRunner service description for App Runner service %s in environment %s: %w", a.svc, a.env, err)
+		return nil, fmt.Errorf("get App Runner service description for App Runner service %s in environment %s: %w", a.svc, a.env, err)
 	}
 	logGroupName := fmt.Sprintf(fmtAppRunnerSvcLogGroupName, svc.Name, svc.ID)
 	logEventsOpts := cloudwatchlogs.LogEventsOpts{
@@ -219,6 +262,57 @@ func (a *appRunnerStatusDescriber) Describe() (HumanJSONStringer, error) {
 		Service:   *svc,
 		LogEvents: logEventsOutput.Events,
 	}, nil
+}
+
+// Describe returns the status of a Static Site service.
+func (d *staticSiteStatusDescriber) Describe() (HumanJSONStringer, error) {
+	dataGetter, nameGetter, err := d.initS3Client(d.env)
+	if err != nil {
+		return nil, err
+	}
+	bucketName, err := nameGetter.BucketName(d.app, d.env, d.svc)
+	if err != nil {
+		return nil, fmt.Errorf("get bucket name for %q Static Site service in %q environment: %w", d.svc, d.env, err)
+	}
+	size, count, err := dataGetter.BucketSizeAndCount(bucketName)
+	if err != nil {
+		return nil, fmt.Errorf("get size and count data for %q S3 bucket: %w", bucketName, err)
+	}
+	return &staticSiteServiceStatus{
+		BucketName: bucketName,
+		Size:       size,
+		Count:      count,
+	}, nil
+}
+
+func (s *ecsStatusDescriber) ecsServiceAutoscalingAlarms(cluster, service string) ([]cloudwatch.AlarmStatus, error) {
+	alarmNames, err := s.aasSvcGetter.ECSServiceAlarmNames(cluster, service)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve auto scaling alarm names for ECS service %s/%s: %w", cluster, service, err)
+	}
+	if len(alarmNames) == 0 {
+		return nil, nil
+	}
+	alarms, err := s.cwSvcGetter.AlarmStatuses(cloudwatch.WithNames(alarmNames))
+	if err != nil {
+		return nil, fmt.Errorf("get auto scaling CloudWatch alarms: %w", err)
+	}
+	for i := range alarms {
+		alarms[i].Type = autoscalingAlarmType
+	}
+	return alarms, nil
+}
+
+func (s *ecsStatusDescriber) ecsServiceRollbackAlarms(app, env, svc string) ([]cloudwatch.AlarmStatus, error) {
+	// This will not fetch imported alarms, as we filter by the Copilot-generated prefix of alarm names. This will also not fetch Copilot-generated alarms with names exceeding 255 characters, due to the balanced truncating of `TruncateAlarmName`.
+	alarms, err := s.cwSvcGetter.AlarmStatuses(cloudwatch.WithPrefix(fmt.Sprintf("%s-%s-%s-CopilotRollback", app, env, svc)))
+	if err != nil {
+		return nil, fmt.Errorf("get Copilot-created CloudWatch alarms: %w", err)
+	}
+	for i := range alarms {
+		alarms[i].Type = rollbackAlarmType
+	}
+	return alarms, nil
 }
 
 // targetHealthForTasks finds the corresponding task, if any, for each target health in a target group.

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strconv"
 	"text/template"
+
+	"github.com/aws/copilot-cli/internal/pkg/aws/s3"
 )
 
 const (
@@ -18,35 +20,38 @@ const (
 
 // Available env-controller managed feature names.
 const (
-	ALBFeatureName         = "ALBWorkloads"
-	EFSFeatureName         = "EFSWorkloads"
-	NATFeatureName         = "NATWorkloads"
-	InternalALBFeatureName = "InternalALBWorkloads"
-	AliasesFeatureName     = "Aliases"
+	ALBFeatureName                     = "ALBWorkloads"
+	EFSFeatureName                     = "EFSWorkloads"
+	NATFeatureName                     = "NATWorkloads"
+	InternalALBFeatureName             = "InternalALBWorkloads"
+	AliasesFeatureName                 = "Aliases"
+	AppRunnerPrivateServiceFeatureName = "AppRunnerPrivateWorkloads"
 )
 
 // LastForceDeployIDOutputName is the logical ID of the deployment controller output.
 const LastForceDeployIDOutputName = "LastForceDeployID"
 
 var friendlyEnvFeatureName = map[string]string{
-	ALBFeatureName:         "ALB",
-	EFSFeatureName:         "EFS",
-	NATFeatureName:         "NAT Gateway",
-	InternalALBFeatureName: "Internal ALB",
-	AliasesFeatureName:     "Aliases",
+	ALBFeatureName:                     "ALB",
+	EFSFeatureName:                     "EFS",
+	NATFeatureName:                     "NAT Gateway",
+	InternalALBFeatureName:             "Internal ALB",
+	AliasesFeatureName:                 "Aliases",
+	AppRunnerPrivateServiceFeatureName: "App Runner Private Services",
 }
 
 var leastVersionForFeature = map[string]string{
-	ALBFeatureName:         "v1.0.0",
-	EFSFeatureName:         "v1.3.0",
-	NATFeatureName:         "v1.3.0",
-	InternalALBFeatureName: "v1.10.0",
-	AliasesFeatureName:     "v1.4.0",
+	ALBFeatureName:                     "v1.0.0",
+	EFSFeatureName:                     "v1.3.0",
+	NATFeatureName:                     "v1.3.0",
+	InternalALBFeatureName:             "v1.10.0",
+	AliasesFeatureName:                 "v1.4.0",
+	AppRunnerPrivateServiceFeatureName: "v1.23.0",
 }
 
 // AvailableEnvFeatures returns a list of the latest available feature, named after their corresponding parameter names.
 func AvailableEnvFeatures() []string {
-	return []string{ALBFeatureName, EFSFeatureName, NATFeatureName, InternalALBFeatureName, AliasesFeatureName}
+	return []string{ALBFeatureName, EFSFeatureName, NATFeatureName, InternalALBFeatureName, AliasesFeatureName, AppRunnerPrivateServiceFeatureName}
 }
 
 // FriendlyEnvFeatureName returns a user-friendly feature name given a env-controller managed parameter name.
@@ -78,6 +83,7 @@ var (
 		"bootstrap-resources",
 		"elb-access-logs",
 		"mappings-regional-configs",
+		"ar-vpc-connector",
 	}
 )
 
@@ -90,42 +96,69 @@ var (
 	}
 )
 
+// Addons holds data about an aggregated addons stack.
+type Addons struct {
+	URL         string
+	ExtraParams string
+}
+
 // EnvOpts holds data that can be provided to enable features in an environment stack template.
 type EnvOpts struct {
-	AppName string // The application name. Needed to create default value for svc discovery endpoint for upgraded environments.
-	EnvName string
-	Version string // The template version to use for the environment. If empty uses the "legacy" template.
+	AppName       string // The application name. Needed to create default value for svc discovery endpoint for upgraded environments.
+	EnvName       string
+	LatestVersion string
 
-	// Custom Resourced backed by Lambda functions.
+	// Custom Resources backed by Lambda functions.
 	CustomResources           map[string]S3ObjectLocation
 	DNSDelegationLambda       string
 	DNSCertValidatorLambda    string
 	EnableLongARNFormatLambda string
 	CustomDomainLambda        string
 
+	Addons               *Addons
 	ScriptBucketName     string
+	PermissionsBoundary  string
 	ArtifactBucketARN    string
 	ArtifactBucketKeyARN string
 
 	VPCConfig         VPCConfig
-	PublicHTTPConfig  HTTPConfig
-	PrivateHTTPConfig HTTPConfig
+	PublicHTTPConfig  PublicHTTPConfig
+	PrivateHTTPConfig PrivateHTTPConfig
 	Telemetry         *Telemetry
 	CDNConfig         *CDNConfig
 
-	LatestVersion      string
 	SerializedManifest string // Serialized manifest used to render the environment template.
 	ForceUpdateID      string
 
 	DelegateDNS bool
 }
 
+// PublicHTTPConfig represents configuration for a public facing Load Balancer.
+type PublicHTTPConfig struct {
+	HTTPConfig
+	PublicALBSourceIPs []string
+	CIDRPrefixListIDs  []string
+	ELBAccessLogs      *ELBAccessLogs
+}
+
+// PrivateHTTPConfig represents configuration for an internal Load Balancer.
+type PrivateHTTPConfig struct {
+	HTTPConfig
+	CustomALBSubnets []string
+}
+
+// HasImportedCerts returns true if any https certificates have been
+// imported to the environment.
+func (e *EnvOpts) HasImportedCerts() bool {
+	return len(e.PublicHTTPConfig.ImportedCertARNs) > 0 ||
+		len(e.PrivateHTTPConfig.ImportedCertARNs) > 0 ||
+		(e.CDNConfig != nil && e.CDNConfig.ImportedCertificate != nil)
+}
+
 // HTTPConfig represents configuration for a Load Balancer.
 type HTTPConfig struct {
-	CIDRPrefixListIDs []string
-	ImportedCertARNs  []string
-	CustomALBSubnets  []string
-	ELBAccessLogs     *ELBAccessLogs
+	SSLPolicy        *string
+	ImportedCertARNs []string
 }
 
 // ELBAccessLogs represents configuration for ELB access logs S3 bucket.
@@ -145,13 +178,24 @@ func (elb *ELBAccessLogs) ShouldCreateBucket() bool {
 // CDNConfig represents a Content Delivery Network deployed by CloudFront.
 type CDNConfig struct {
 	ImportedCertificate *string
+	TerminateTLS        bool
+	Static              *CDNStaticAssetConfig
 }
 
+// CDNStaticAssetConfig represents static assets config for a Content Delivery Network.
+type CDNStaticAssetConfig struct {
+	Path           string
+	ImportedBucket string
+	Alias          string
+}
+
+// VPCConfig represents the VPC configuration.
 type VPCConfig struct {
 	Imported            *ImportVPC // If not-nil, use the imported VPC resources instead of the Managed VPC.
 	Managed             ManagedVPC
 	AllowVPCIngress     bool
 	SecurityGroupConfig *SecurityGroupConfig
+	FlowLogs            *VPCFlowLogs
 }
 
 // ImportVPC holds the fields to import VPC resources.
@@ -186,6 +230,11 @@ type SecurityGroupRule struct {
 	FromPort   int
 	IpProtocol string
 	ToPort     int
+}
+
+// VPCFlowLogs holds the fields to configure logging IP traffic using VPC flow logs.
+type VPCFlowLogs struct {
+	Retention *int
 }
 
 // ParseEnv parses an environment's CloudFormation template with the specified data object and returns its content.
@@ -237,9 +286,24 @@ func (t *Template) ParseEnvBootstrap(data *EnvOpts, options ...ParseOption) (*Co
 func withEnvParsingFuncs() ParseOption {
 	return func(t *template.Template) *template.Template {
 		return t.Funcs(map[string]interface{}{
-			"inc":      IncFunc,
-			"fmtSlice": FmtSliceFunc,
-			"quote":    strconv.Quote,
+			"inc":               IncFunc,
+			"fmtSlice":          FmtSliceFunc,
+			"quote":             strconv.Quote,
+			"truncate":          truncate,
+			"bucketNameFromURL": bucketNameFromURL,
+			"logicalIDSafe":     StripNonAlphaNumFunc,
 		})
 	}
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) < maxLen {
+		return s
+	}
+	return s[:maxLen]
+}
+
+func bucketNameFromURL(url string) string {
+	bucketName, _, _ := s3.ParseURL(url)
+	return bucketName
 }

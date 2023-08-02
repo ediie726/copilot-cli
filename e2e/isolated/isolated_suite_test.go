@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/copilot-cli/e2e/internal/client"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -22,7 +22,7 @@ var vpcImport client.EnvInitRequestVPCImport
 var timeNow = time.Now().Unix()
 
 const svcName = "backend"
-const envName = "private"
+const envName = "test"
 
 /**
 The Isolated Suite creates an environment with an imported VPC with only
@@ -49,21 +49,16 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	_, err := cli.AppDelete()
-	Expect(err).NotTo(HaveOccurred())
-	// Delete VPC stack.
-	err = aws.DeleteStack(vpcStackName)
-	Expect(err).NotTo(HaveOccurred())
-	err = aws.WaitStackDeleteComplete(vpcStackName)
-	Expect(err).NotTo(HaveOccurred())
+	_, deleteAppErr := cli.AppDelete()
+	deleteVPCErr := deleteVPCAndWait()
+	Expect(deleteAppErr).NotTo(HaveOccurred())
+	Expect(deleteVPCErr).NotTo(HaveOccurred())
 })
 
-func BeforeAll(fn func()) {
-	first := true
-	BeforeEach(func() {
-		if first {
-			fn()
-			first = false
-		}
-	})
+func deleteVPCAndWait() error {
+	err := aws.DeleteStack(vpcStackName)
+	if err != nil {
+		return err
+	}
+	return aws.WaitStackDeleteComplete(vpcStackName)
 }

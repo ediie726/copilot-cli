@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/aws/copilot-cli/e2e/internal/client"
@@ -15,7 +15,7 @@ import (
 
 var _ = Describe("Import Certificates", func() {
 
-	Context("when creating a new app", func() {
+	Context("when creating a new app", Ordered, func() {
 		var appInitErr error
 
 		BeforeAll(func() {
@@ -37,7 +37,7 @@ var _ = Describe("Import Certificates", func() {
 		})
 	})
 
-	Context("when adding new environment", func() {
+	Context("when adding new environment", Ordered, func() {
 		var (
 			err error
 		)
@@ -45,7 +45,7 @@ var _ = Describe("Import Certificates", func() {
 			_, err = cli.EnvInit(&client.EnvInitRequest{
 				AppName:           appName,
 				EnvName:           "test",
-				Profile:           "default",
+				Profile:           "test",
 				CertificateImport: importedCert,
 			})
 		})
@@ -54,7 +54,7 @@ var _ = Describe("Import Certificates", func() {
 		})
 	})
 
-	Context("when deploying the environments", func() {
+	Context("when deploying the environments", Ordered, func() {
 		var envDeployErr error
 		BeforeAll(func() {
 			_, envDeployErr = cli.EnvDeploy(&client.EnvDeployRequest{
@@ -101,7 +101,7 @@ var _ = Describe("Import Certificates", func() {
 			Expect(len(svc.Routes)).To(Equal(1))
 
 			wantedURLs := map[string]string{
-				"test": "https://test.copilot-e2e-tests.ecs.aws.dev",
+				"test": "https://frontend.import-certs.copilot-e2e-tests.ecs.aws.dev",
 			}
 			for _, route := range svc.Routes {
 				// Validate route has the expected HTTPS endpoint.

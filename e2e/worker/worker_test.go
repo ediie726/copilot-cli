@@ -6,13 +6,13 @@ package worker_test
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
 
 	"github.com/aws/copilot-cli/e2e/internal/client"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -42,7 +42,7 @@ var _ = Describe("Worker Service E2E Test", func() {
 			_, err := cli.EnvInit(&client.EnvInitRequest{
 				AppName: appName,
 				EnvName: envName,
-				Profile: "default",
+				Profile: envName,
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -222,7 +222,7 @@ publish:
 					return fmt.Errorf("response status is %d and not %d", resp.StatusCode, http.StatusOK)
 				}
 
-				body, err := ioutil.ReadAll(resp.Body)
+				body, err := io.ReadAll(resp.Body)
 				if err != nil {
 					return err
 				}
@@ -254,7 +254,7 @@ publish:
 					return fmt.Errorf("response status is %d and not %d", resp.StatusCode, http.StatusOK)
 				}
 
-				body, err := ioutil.ReadAll(resp.Body)
+				body, err := io.ReadAll(resp.Body)
 				if err != nil {
 					return err
 				}

@@ -6,19 +6,14 @@ package exec
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
-)
-
-const (
-	ssmPluginBinaryURL = "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/mac/sessionmanager-bundle.zip"
 )
 
 // InstallLatestBinary installs the latest ssm plugin.
 func (s SSMPluginCommand) InstallLatestBinary() error {
 	if s.tempDir == "" {
-		dir, err := ioutil.TempDir("", "ssmplugin")
+		dir, err := os.MkdirTemp("", "ssmplugin")
 		if err != nil {
 			return fmt.Errorf("create a temporary directory: %w", err)
 		}

@@ -21,6 +21,8 @@ Copilot v1.18 では、いくつかの新機能提供と改善が行われまし
 
 ## AWS Copilot とは?
 
+投稿日: 2022 年 5 月 9 日
+
 AWS Copilot CLI は AWS 上でプロダクションレディなコンテナ化されたアプリケーションのビルド、リリース、そして運用のためのツールです。
 開発のスタートからステージング環境へのプッシュ、本番環境へのリリースまで、Copilot はアプリケーション開発ライフサイクル全体の管理を容易にします。
 Copilot の基礎となるのは、 AWS CloudFormation です。CloudFormation により、インフラストラクチャを 1 回の操作でコードとしてプロビジョニングできます。
@@ -197,7 +199,7 @@ observability:
   tracing: awsxray
 ```
 
-これらのサービスタイプでは、Copilot は [AWS Distro for OpenTelemetry Collector](https://github.com/aws-observability/aws-otel-collector) サイドカーコンテナをデプロイして、Service からトレースを収集し、X-Ray にエクスポートします。トレースを送信するために [Service をインストルメント化](../docs/developing/observability.ja.md#instrumenting-your-service) (訳注: 計装、 アプリケーションに計測のためのコードを追加すること) をした後、Application のデバッグとパフォーマンスの監視するために、Service を通してエンドツーエンドでリクエストの実行状況を確認できます。
+これらの Service タイプでは、Copilot は [AWS Distro for OpenTelemetry Collector](https://github.com/aws-observability/aws-otel-collector) サイドカーコンテナをデプロイして、Service からトレースを収集し、X-Ray にエクスポートします。トレースを送信するために [Service をインストルメント化](../docs/developing/observability.ja.md#instrumenting-your-service) (訳注: 計装、 アプリケーションに計測のためのコードを追加すること) をした後、Application のデバッグとパフォーマンスの監視するために、Service を通してエンドツーエンドでリクエストの実行状況を確認できます。
 
 ![X-Ray Service Map Example](https://user-images.githubusercontent.com/10566468/166986340-e3b7c0e2-c84d-4671-bf37-ba95bdb1d6b2.png)
 
@@ -211,3 +213,5 @@ observability:
 * [最新 CLI バージョン](../docs/getting-started/install.ja.md)のダウンロード
 * [スタートガイド](../docs/getting-started/first-app-tutorial.ja.md)を試す
 * [GitHub](https://github.com/aws/copilot-cli/releases/tag/v1.18.0) でリリースノートの全文を読む
+
+今回のリリースの翻訳はソリューションアーキテクトの杉本が担当しました。

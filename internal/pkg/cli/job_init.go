@@ -11,6 +11,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/aws/copilot-cli/internal/pkg/aws/identity"
+	"github.com/aws/copilot-cli/internal/pkg/describe"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 
 	"github.com/aws/copilot-cli/internal/pkg/docker/dockerfile"
 
@@ -41,11 +44,11 @@ lets you use a predefined or custom cron schedule and is good for less-frequent
 jobs or those which require specific execution schedules.`
 
 	jobInitTypeHelp = fmt.Sprintf(`A %s is a task which is invoked on a set schedule, with optional retry logic.
-To learn more see: https://git.io/JEEU4`, manifest.ScheduledJobType)
+To learn more see: https://git.io/JEEU4`, manifestinfo.ScheduledJobType)
 )
 
 var jobTypeHints = map[string]string{
-	manifest.ScheduledJobType: "Scheduled event to State Machine to Fargate",
+	manifestinfo.ScheduledJobType: "Scheduled event to State Machine to Fargate",
 }
 
 type initJobVars struct {
@@ -60,13 +63,14 @@ type initJobOpts struct {
 	initJobVars
 
 	// Interfaces to interact with dependencies.
-	fs           afero.Fs
-	store        store
-	init         jobInitializer
-	prompt       prompter
-	sel          initJobSelector
-	dockerEngine dockerEngine
-	mftReader    manifestReader
+	fs               afero.Fs
+	store            store
+	init             jobInitializer
+	prompt           prompter
+	dockerEngine     dockerEngine
+	mftReader        manifestReader
+	dockerfileSel    dockerfileSelector
+	scheduleSelector scheduleSelector
 
 	// Outputs stored on successful actions.
 	manifestPath   string
@@ -77,14 +81,19 @@ type initJobOpts struct {
 	wsPendingCreation bool
 	wsAppName         string
 
-	// Init a Dockerfile parser using fs and input path
-	initParser func(string) dockerfileParser
+	initParser          func(path string) dockerfileParser
+	initEnvDescriber    func(appName, envName string) (envDescriber, error)
+	newAppVersionGetter func(appName string) (versionGetter, error)
+
+	// Overridden in tests.
+	templateVersion string
 }
 
 func newInitJobOpts(vars initJobVars) (*initJobOpts, error) {
-	ws, err := workspace.New()
+	fs := afero.NewOsFs()
+	ws, err := workspace.Use(fs)
 	if err != nil {
-		return nil, fmt.Errorf("workspace cannot be created: %w", err)
+		return nil, err
 	}
 
 	p := sessions.ImmutableProvider(sessions.UserAgentExtras("job init"))
@@ -93,9 +102,6 @@ func newInitJobOpts(vars initJobVars) (*initJobOpts, error) {
 		return nil, err
 	}
 	store := config.NewSSMStore(identity.New(sess), ssm.New(sess), aws.StringValue(sess.Config.Region))
-
-	fs := &afero.Afero{Fs: afero.NewOsFs()}
-
 	jobInitter := &initialize.WorkloadInitializer{
 		Store:    store,
 		Ws:       ws,
@@ -104,22 +110,40 @@ func newInitJobOpts(vars initJobVars) (*initJobOpts, error) {
 	}
 
 	prompter := prompt.New()
-	sel := selector.NewWorkspaceSelector(prompter, ws)
-
+	dockerfileSel, err := selector.NewDockerfileSelector(prompter, fs)
+	if err != nil {
+		return nil, err
+	}
 	return &initJobOpts{
 		initJobVars: vars,
 
-		fs:           fs,
-		store:        store,
-		init:         jobInitter,
-		prompt:       prompter,
-		sel:          sel,
-		dockerEngine: dockerengine.New(exec.NewCmd()),
-		mftReader:    ws,
+		fs:               fs,
+		store:            store,
+		init:             jobInitter,
+		prompt:           prompter,
+		dockerfileSel:    dockerfileSel,
+		scheduleSelector: selector.NewStaticSelector(prompter),
+		dockerEngine:     dockerengine.New(exec.NewCmd()),
+		mftReader:        ws,
 		initParser: func(path string) dockerfileParser {
 			return dockerfile.New(fs, path)
 		},
-		wsAppName: tryReadingAppName(),
+		initEnvDescriber: func(appName string, envName string) (envDescriber, error) {
+			envDescriber, err := describe.NewEnvDescriber(describe.NewEnvDescriberConfig{
+				App:         appName,
+				Env:         envName,
+				ConfigStore: store,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return envDescriber, nil
+		},
+		newAppVersionGetter: func(appName string) (versionGetter, error) {
+			return describe.NewAppDescriber(appName)
+		},
+		wsAppName:       tryReadingAppName(),
+		templateVersion: version.LatestTemplateVersion(),
 	}, nil
 }
 
@@ -173,25 +197,24 @@ func (o *initJobOpts) Ask() error {
 	if err := o.validateDuplicateJob(); err != nil {
 		return err
 	}
-	localMft, err := o.mftReader.ReadWorkloadManifest(o.name)
-	if err == nil {
-		jobType, err := localMft.WorkloadType()
-		if err != nil {
-			return fmt.Errorf(`read "type" field for job %s from local manifest: %w`, o.name, err)
+	if !o.wsPendingCreation {
+		localMft, err := o.mftReader.ReadWorkloadManifest(o.name)
+		if err == nil {
+			jobType, err := localMft.WorkloadType()
+			if err != nil {
+				return fmt.Errorf(`read "type" field for job %s from local manifest: %w`, o.name, err)
+			}
+			if o.wkldType != jobType {
+				return fmt.Errorf("manifest file for job %s exists with a different type %s", o.name, jobType)
+			}
+			log.Infof("Manifest file for job %s already exists. Skipping configuration.\n", o.name)
+			o.manifestExists = true
+			return nil
 		}
-		if o.wkldType != jobType {
-			return fmt.Errorf("manifest file for job %s exists with a different type %s", o.name, jobType)
+		var errNotFound *workspace.ErrFileNotExists
+		if !errors.As(err, &errNotFound) {
+			return fmt.Errorf("read manifest file for job %s: %w", o.name, err)
 		}
-		log.Infof("Manifest file for job %s already exists. Skipping configuration.\n", o.name)
-		o.manifestExists = true
-		return nil
-	}
-	var (
-		errNotFound          *workspace.ErrFileNotExists
-		errWorkspaceNotFound *workspace.ErrWorkspaceNotFound
-	)
-	if !errors.As(err, &errNotFound) && !errors.As(err, &errWorkspaceNotFound) {
-		return fmt.Errorf("read manifest file for job %s: %w", o.name, err)
 	}
 	dfSelected, err := o.askDockerfile()
 	if err != nil {
@@ -213,8 +236,46 @@ func (o *initJobOpts) Ask() error {
 	return nil
 }
 
+// envsWithPrivateSubnetsOnly returns the list of environments names deployed that contains only private subnets.
+func envsWithPrivateSubnetsOnly(store store, initEnvDescriber func(string, string) (envDescriber, error), appName string) ([]string, error) {
+	envs, err := store.ListEnvironments(appName)
+	if err != nil {
+		return nil, fmt.Errorf("list environments for application %s: %w", appName, err)
+	}
+	var privateOnlyEnvs []string
+	for _, env := range envs {
+		envDescriber, err := initEnvDescriber(appName, env.Name)
+		if err != nil {
+			return nil, err
+		}
+		mft, err := envDescriber.Manifest()
+		if err != nil {
+			return nil, fmt.Errorf("read the manifest used to deploy environment %s: %w", env.Name, err)
+		}
+		envConfig, err := manifest.UnmarshalEnvironment(mft)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal the manifest used to deploy environment %s: %w", env.Name, err)
+		}
+		subnets := envConfig.Network.VPC.Subnets
+
+		if len(subnets.Public) == 0 && len(subnets.Private) != 0 {
+			privateOnlyEnvs = append(privateOnlyEnvs, env.Name)
+		}
+	}
+	return privateOnlyEnvs, err
+}
+
 // Execute writes the job's manifest file, creates an ECR repo, and stores the name in SSM.
 func (o *initJobOpts) Execute() error {
+	if !o.allowAppDowngrade {
+		appVersionGetter, err := o.newAppVersionGetter(o.appName)
+		if err != nil {
+			return err
+		}
+		if err := validateAppVersion(appVersionGetter, o.appName, o.templateVersion); err != nil {
+			return err
+		}
+	}
 	// Check for a valid healthcheck and add it to the opts.
 	var hc manifest.ContainerHealthCheck
 	var err error
@@ -234,6 +295,10 @@ func (o *initJobOpts) Execute() error {
 			o.platform = &platform
 		}
 	}
+	envs, err := envsWithPrivateSubnetsOnly(o.store, o.initEnvDescriber, o.appName)
+	if err != nil {
+		return err
+	}
 	manifestPath, err := o.init.Job(&initialize.JobProps{
 		WorkloadProps: initialize.WorkloadProps{
 			App:            o.appName,
@@ -244,6 +309,7 @@ func (o *initJobOpts) Execute() error {
 			Platform: manifest.PlatformArgsOrString{
 				PlatformString: o.platform,
 			},
+			PrivateOnlyEnvironments: envs,
 		},
 
 		Schedule:    o.schedule,
@@ -295,7 +361,7 @@ func (o *initJobOpts) askJobType() error {
 		return nil
 	}
 	// short circuit since there's only one valid job type.
-	o.wkldType = manifest.ScheduledJobType
+	o.wkldType = manifestinfo.ScheduledJobType
 	return nil
 }
 
@@ -349,7 +415,7 @@ func (o *initJobOpts) askDockerfile() (isDfSelected bool, err error) {
 			return false, fmt.Errorf("check if docker engine is running: %w", err)
 		}
 	}
-	df, err := o.sel.Dockerfile(
+	df, err := o.dockerfileSel.Dockerfile(
 		fmt.Sprintf(fmtWkldInitDockerfilePrompt, color.HighlightUserInput(o.name)),
 		fmt.Sprintf(fmtWkldInitDockerfilePathPrompt, color.HighlightUserInput(o.name)),
 		wkldInitDockerfileHelpPrompt,
@@ -369,7 +435,7 @@ func (o *initJobOpts) askDockerfile() (isDfSelected bool, err error) {
 }
 
 func (o *initJobOpts) askSchedule() error {
-	schedule, err := o.sel.Schedule(
+	schedule, err := o.scheduleSelector.Schedule(
 		jobInitSchedulePrompt,
 		jobInitScheduleHelp,
 		validateSchedule,
@@ -385,7 +451,7 @@ func (o *initJobOpts) askSchedule() error {
 
 func jobTypePromptOpts() []prompt.Option {
 	var options []prompt.Option
-	for _, jobType := range manifest.JobTypes() {
+	for _, jobType := range manifestinfo.JobTypes() {
 		options = append(options, prompt.Option{
 			Value: jobType,
 			Hint:  jobTypeHints[jobType],
@@ -422,6 +488,7 @@ func buildJobInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&vars.timeout, timeoutFlag, "", timeoutFlagDescription)
 	cmd.Flags().IntVar(&vars.retries, retriesFlag, 0, retriesFlagDescription)
 	cmd.Flags().StringVarP(&vars.image, imageFlag, imageFlagShort, "", imageFlagDescription)
+	cmd.Flags().BoolVar(&vars.allowAppDowngrade, allowDowngradeFlag, false, allowDowngradeFlagDescription)
 
 	cmd.Annotations = map[string]string{
 		"group": group.Develop,

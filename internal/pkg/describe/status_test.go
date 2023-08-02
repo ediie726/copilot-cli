@@ -79,7 +79,7 @@ func TestServiceStatusDesc_String(t *testing.T) {
 						Name:         "mySupercalifragilisticexpialidociousAlarm",
 						Condition:    "RequestCount > 100.00 for 3 datapoints within 25 minutes",
 						Status:       "OK",
-						Type:         "Metric",
+						Type:         "Auto Scaling",
 						UpdatedTimes: updateTime,
 					},
 					{
@@ -87,7 +87,7 @@ func TestServiceStatusDesc_String(t *testing.T) {
 						Name:         "Um-dittle-ittl-um-dittle-I-Alarm",
 						Condition:    "CPUUtilization > 70.00 for 3 datapoints within 3 minutes",
 						Status:       "OK",
-						Type:         "Metric",
+						Type:         "Rollback",
 						UpdatedTimes: updateTime,
 					},
 				},
@@ -130,16 +130,16 @@ Tasks
 
 Alarms
 
-  Name                            Condition                       Last Updated       Health
-  ----                            ---------                       ------------       ------
-  mySupercalifragilisticexpialid  RequestCount > 100.00 for 3 da  2 months from now  OK
-  ociousAlarm                     tapoints within 25 minutes                         
-                                                                                     
-  Um-dittle-ittl-um-dittle-I-Ala  CPUUtilization > 70.00 for 3 d  2 months from now  OK
-  rm                              atapoints within 3 minutes                         
-                                                                                     
+  Name                            Type          Condition                       Last Updated       Health
+  ----                            ----          ---------                       ------------       ------
+  mySupercalifragilisticexpialid  Auto Scaling  RequestCount > 100.00 for 3 da  2 months from now  OK
+  ociousAlarm                                   tapoints within 25 minutes                         
+                                                                                                   
+  Um-dittle-ittl-um-dittle-I-Ala  Rollback      CPUUtilization > 70.00 for 3 d  2 months from now  OK
+  rm                                            atapoints within 3 minutes                         
+                                                                                                   
 `,
-			json: `{"Service":{"desiredCount":10,"runningCount":3,"status":"ACTIVE","deployments":[{"id":"active-1","desiredCount":1,"runningCount":1,"updatedAt":"0001-01-01T00:00:00Z","launchType":"","taskDefinition":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:5","status":"ACTIVE"},{"id":"active-2","desiredCount":2,"runningCount":1,"updatedAt":"0001-01-01T00:00:00Z","launchType":"","taskDefinition":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:4","status":"ACTIVE"},{"id":"id-4","desiredCount":10,"runningCount":1,"updatedAt":"0001-01-01T00:00:00Z","launchType":"","taskDefinition":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:6","status":"PRIMARY"},{"id":"id-5","desiredCount":0,"runningCount":0,"updatedAt":"0001-01-01T00:00:00Z","launchType":"","taskDefinition":"","status":"INACTIVE"}],"lastDeploymentAt":"0001-01-01T00:00:00Z","taskDefinition":""},"tasks":[{"health":"HEALTHY","id":"111111111111111","images":null,"lastStatus":"RUNNING","startedAt":"0001-01-01T00:00:00Z","stoppedAt":"0001-01-01T00:00:00Z","stoppedReason":"","capacityProvider":"","taskDefinitionARN":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:5"},{"health":"UNKNOWN","id":"111111111111111","images":null,"lastStatus":"RUNNING","startedAt":"0001-01-01T00:00:00Z","stoppedAt":"0001-01-01T00:00:00Z","stoppedReason":"","capacityProvider":"","taskDefinitionARN":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:4"},{"health":"HEALTHY","id":"1234567890123456789","images":null,"lastStatus":"PROVISIONING","startedAt":"0001-01-01T00:00:00Z","stoppedAt":"0001-01-01T00:00:00Z","stoppedReason":"","capacityProvider":"","taskDefinitionARN":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:6"}],"alarms":[{"arn":"mockAlarmArn1","name":"mySupercalifragilisticexpialidociousAlarm","condition":"RequestCount \u003e 100.00 for 3 datapoints within 25 minutes","status":"OK","type":"Metric","updatedTimes":"2020-03-13T19:50:30Z"},{"arn":"mockAlarmArn2","name":"Um-dittle-ittl-um-dittle-I-Alarm","condition":"CPUUtilization \u003e 70.00 for 3 datapoints within 3 minutes","status":"OK","type":"Metric","updatedTimes":"2020-03-13T19:50:30Z"}],"stoppedTasks":null,"targetHealthDescriptions":null}
+			json: `{"Service":{"desiredCount":10,"runningCount":3,"status":"ACTIVE","deployments":[{"id":"active-1","desiredCount":1,"runningCount":1,"updatedAt":"0001-01-01T00:00:00Z","launchType":"","taskDefinition":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:5","status":"ACTIVE"},{"id":"active-2","desiredCount":2,"runningCount":1,"updatedAt":"0001-01-01T00:00:00Z","launchType":"","taskDefinition":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:4","status":"ACTIVE"},{"id":"id-4","desiredCount":10,"runningCount":1,"updatedAt":"0001-01-01T00:00:00Z","launchType":"","taskDefinition":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:6","status":"PRIMARY"},{"id":"id-5","desiredCount":0,"runningCount":0,"updatedAt":"0001-01-01T00:00:00Z","launchType":"","taskDefinition":"","status":"INACTIVE"}],"lastDeploymentAt":"0001-01-01T00:00:00Z","taskDefinition":""},"tasks":[{"health":"HEALTHY","id":"111111111111111","images":null,"lastStatus":"RUNNING","startedAt":"0001-01-01T00:00:00Z","stoppedAt":"0001-01-01T00:00:00Z","stoppedReason":"","capacityProvider":"","taskDefinitionARN":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:5"},{"health":"UNKNOWN","id":"111111111111111","images":null,"lastStatus":"RUNNING","startedAt":"0001-01-01T00:00:00Z","stoppedAt":"0001-01-01T00:00:00Z","stoppedReason":"","capacityProvider":"","taskDefinitionARN":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:4"},{"health":"HEALTHY","id":"1234567890123456789","images":null,"lastStatus":"PROVISIONING","startedAt":"0001-01-01T00:00:00Z","stoppedAt":"0001-01-01T00:00:00Z","stoppedReason":"","capacityProvider":"","taskDefinitionARN":"arn:aws:ecs:us-east-1:000000000000:task-definition/some-task-def:6"}],"alarms":[{"arn":"mockAlarmArn1","name":"mySupercalifragilisticexpialidociousAlarm","condition":"RequestCount \u003e 100.00 for 3 datapoints within 25 minutes","status":"OK","type":"Auto Scaling","updatedTimes":"2020-03-13T19:50:30Z"},{"arn":"mockAlarmArn2","name":"Um-dittle-ittl-um-dittle-I-Alarm","condition":"CPUUtilization \u003e 70.00 for 3 datapoints within 3 minutes","status":"OK","type":"Rollback","updatedTimes":"2020-03-13T19:50:30Z"}],"stoppedTasks":null,"targetHealthDescriptions":null}
 `,
 		},
 		"while running with both health check (all primary)": {
@@ -605,6 +605,38 @@ System Logs
   2021-05-18T19:26:25Z  [AppRunner] Service creation started.
 `,
 			json: `{"arn":"arn:aws:apprunner:us-east-1:1111:service/frontend/8a2b343f658144d885e47d10adb4845e","status":"RUNNING","createdAt":"2020-01-01T00:00:00Z","updatedAt":"2020-03-01T00:00:00Z","source":{"imageId":"hello"}}` + "\n",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			json, err := tc.desc.JSONString()
+			require.NoError(t, err)
+			require.Equal(t, tc.human, tc.desc.HumanString())
+			require.Equal(t, tc.json, json)
+		})
+	}
+}
+
+func TestServiceStatusDesc_StaticSiteServiceString(t *testing.T) {
+	testCases := map[string]struct {
+		desc  *staticSiteServiceStatus
+		human string
+		json  string
+	}{
+		"success": {
+			desc: &staticSiteServiceStatus{
+				BucketName: "Jimmy Buckets",
+				Size:       "999 MB",
+				Count:      22,
+			},
+			human: `Bucket Summary
+
+  Bucket Name     Jimmy Buckets
+  Total Objects   22
+  Total Size      999 MB
+`,
+			json: `{"bucketName":"Jimmy Buckets","totalSize":"999 MB","totalObjects":22}` + "\n",
 		},
 	}
 

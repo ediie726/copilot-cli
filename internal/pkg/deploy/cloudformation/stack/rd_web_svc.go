@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aws/copilot-cli/internal/pkg/deploy"
-
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/copilot-cli/internal/pkg/deploy"
+	"github.com/aws/copilot-cli/internal/pkg/deploy/upload/customresource"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/template"
 )
 
@@ -38,11 +39,6 @@ var awsSDKLayerForRegion = map[string]*string{
 	"me-south-1":     aws.String("arn:aws:lambda:me-south-1:507411403535:layer:AWSLambda-Node-AWS-SDK:10"),
 }
 
-type requestDrivenWebSvcReadParser interface {
-	template.ReadParser
-	ParseRequestDrivenWebService(template.WorkloadOpts) (*template.Content, error)
-}
-
 // RequestDrivenWebService represents the configuration needed to create a CloudFormation stack from a request-drive web service manifest.
 type RequestDrivenWebService struct {
 	*appRunnerWkld
@@ -54,29 +50,36 @@ type RequestDrivenWebService struct {
 
 // RequestDrivenWebServiceConfig contains data required to initialize a request-driven web service stack.
 type RequestDrivenWebServiceConfig struct {
-	App         deploy.AppInformation
-	Env         string
-	Manifest    *manifest.RequestDrivenWebService
-	RawManifest []byte
-
-	RuntimeConfig RuntimeConfig
-	Addons        addons
+	App                deploy.AppInformation
+	Env                string
+	Manifest           *manifest.RequestDrivenWebService
+	RawManifest        []byte
+	ArtifactBucketName string
+	RuntimeConfig      RuntimeConfig
+	Addons             NestedStackConfigurer
 }
 
 // NewRequestDrivenWebService creates a new RequestDrivenWebService stack from a manifest file.
 func NewRequestDrivenWebService(cfg RequestDrivenWebServiceConfig) (*RequestDrivenWebService, error) {
-	parser := template.New()
+	crs, err := customresource.RDWS(fs)
+	if err != nil {
+		return nil, fmt.Errorf("request-driven web service custom resources: %w", err)
+	}
+	cfg.RuntimeConfig.loadCustomResourceURLs(cfg.ArtifactBucketName, uploadableCRs(crs).convert())
+
 	return &RequestDrivenWebService{
 		appRunnerWkld: &appRunnerWkld{
 			wkld: &wkld{
-				name:        aws.StringValue(cfg.Manifest.Name),
-				env:         cfg.Env,
-				app:         cfg.App.Name,
-				rc:          cfg.RuntimeConfig,
-				image:       cfg.Manifest.ImageConfig.Image,
-				rawManifest: cfg.RawManifest,
-				addons:      cfg.Addons,
-				parser:      parser,
+				name:               aws.StringValue(cfg.Manifest.Name),
+				env:                cfg.Env,
+				app:                cfg.App.Name,
+				permBound:          cfg.App.PermissionsBoundary,
+				artifactBucketName: cfg.ArtifactBucketName,
+				rc:                 cfg.RuntimeConfig,
+				image:              cfg.Manifest.ImageConfig.Image,
+				rawManifest:        cfg.RawManifest,
+				addons:             cfg.Addons,
+				parser:             fs,
 			},
 			instanceConfig:    cfg.Manifest.InstanceConfig,
 			imageConfig:       cfg.Manifest.ImageConfig,
@@ -84,7 +87,7 @@ func NewRequestDrivenWebService(cfg RequestDrivenWebServiceConfig) (*RequestDriv
 		},
 		app:      cfg.App,
 		manifest: cfg.Manifest,
-		parser:   parser,
+		parser:   fs,
 	}, nil
 }
 
@@ -117,14 +120,16 @@ func (s *RequestDrivenWebService) Template() (string, error) {
 		EnvName:            s.env,
 		WorkloadName:       s.name,
 		SerializedManifest: string(s.rawManifest),
+		EnvVersion:         s.rc.EnvVersion,
+		Version:            s.rc.Version,
 
-		Variables:            s.manifest.Variables,
+		Variables:            convertEnvVars(s.manifest.Variables),
 		StartCommand:         s.manifest.StartCommand,
 		Tags:                 s.manifest.Tags,
 		NestedStack:          addonsOutputs,
 		AddonsExtraParams:    addonsParams,
-		EnableHealthCheck:    !s.healthCheckConfig.IsEmpty(),
-		WorkloadType:         manifest.RequestDrivenWebServiceType,
+		EnableHealthCheck:    !s.healthCheckConfig.IsZero(),
+		WorkloadType:         manifestinfo.RequestDrivenWebServiceType,
 		Alias:                s.manifest.Alias,
 		CustomResources:      crs,
 		AWSSDKLayer:          layerARN,
@@ -138,6 +143,11 @@ func (s *RequestDrivenWebService) Template() (string, error) {
 		Observability: template.ObservabilityOpts{
 			Tracing: strings.ToUpper(aws.StringValue(s.manifest.Observability.Tracing)),
 		},
+		PermissionsBoundary:  s.permBound,
+		Private:              aws.BoolValue(s.manifest.Private.Basic) || s.manifest.Private.Advanced.Endpoint != nil,
+		AppRunnerVPCEndpoint: s.manifest.Private.Advanced.Endpoint,
+		Count:                s.manifest.Count,
+		Secrets:              convertSecrets(s.manifest.RequestDrivenWebServiceConfig.Secrets),
 	})
 	if err != nil {
 		return "", err

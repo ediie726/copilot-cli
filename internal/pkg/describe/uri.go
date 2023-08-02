@@ -7,25 +7,31 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aws/copilot-cli/internal/pkg/term/color"
+
 	"github.com/dustin/go-humanize/english"
 
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
-	"github.com/aws/copilot-cli/internal/pkg/manifest"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 )
 
+// URIAccessType represents how a URI can be accessed.
 type URIAccessType int
 
+// Supported URI Access Types.
 const (
 	URIAccessTypeNone URIAccessType = iota
 	URIAccessTypeInternet
 	URIAccessTypeInternal
 	URIAccessTypeServiceDiscovery
+	URIAccessTypeServiceConnect
 )
 
 var (
 	fmtSvcDiscoveryEndpointWithPort = "%s.%s:%s" // Format string of the form {svc}.{endpoint}:{port}
 )
 
+// URI represents a uri and how it can be accessed.
 type URI struct {
 	URI        string
 	AccessType URIAccessType
@@ -48,14 +54,19 @@ func NewReachableService(app, svc string, store ConfigStoreSvc) (ReachableServic
 		ConfigStore: store,
 	}
 	switch cfg.Type {
-	case manifest.LoadBalancedWebServiceType:
+	case manifestinfo.LoadBalancedWebServiceType:
 		return NewLBWebServiceDescriber(in)
-	case manifest.RequestDrivenWebServiceType:
+	case manifestinfo.RequestDrivenWebServiceType:
 		return NewRDWebServiceDescriber(in)
-	case manifest.BackendServiceType:
+	case manifestinfo.BackendServiceType:
 		return NewBackendServiceDescriber(in)
+	case manifestinfo.StaticSiteType:
+		return NewStaticSiteDescriber(in)
 	default:
-		return nil, fmt.Errorf("service %s is of type %s which cannot be reached over the network", svc, cfg.Type)
+		return nil, &ErrNonAccessibleServiceType{
+			name:    svc,
+			svcType: cfg.Type,
+		}
 	}
 }
 
@@ -70,15 +81,15 @@ func (d *LBWebServiceDescriber) URI(envName string) (URI, error) {
 		return URI{}, err
 	}
 	var albEnabled, nlbEnabled bool
-	resources, err := svcDescr.ServiceStackResources()
+	resources, err := svcDescr.StackResources()
 	if err != nil {
 		return URI{}, fmt.Errorf("get stack resources for service %s: %w", d.svc, err)
 	}
 	for _, resource := range resources {
-		if resource.LogicalID == svcStackResourceALBTargetGroupLogicalID {
+		if strings.HasPrefix(resource.LogicalID, svcStackResourceALBTargetGroupLogicalID) {
 			albEnabled = true
 		}
-		if resource.LogicalID == svcStackResourceNLBTargetGroupLogicalID {
+		if strings.HasPrefix(resource.LogicalID, svcStackResourceNLBTargetGroupLogicalID) {
 			nlbEnabled = true
 		}
 	}
@@ -160,7 +171,7 @@ func (d *BackendServiceDescriber) URI(envName string) (URI, error) {
 	if err != nil {
 		return URI{}, err
 	}
-	resources, err := svcDescr.ServiceStackResources()
+	resources, err := svcDescr.StackResources()
 	if err != nil {
 		return URI{}, fmt.Errorf("get stack resources for service %s: %w", d.svc, err)
 	}
@@ -192,11 +203,20 @@ func (d *BackendServiceDescriber) URI(envName string) (URI, error) {
 	if err != nil {
 		return URI{}, fmt.Errorf("get stack parameters for environment %s: %w", envName, err)
 	}
-	port := svcStackParams[stack.WorkloadContainerPortParamKey]
-	if port == stack.NoExposedContainerPort {
+	if !isReachableWithinVPC(svcStackParams) {
 		return URI{
 			URI:        BlankServiceDiscoveryURI,
 			AccessType: URIAccessTypeNone,
+		}, nil
+	}
+	scDNSNames, err := svcDescr.ServiceConnectDNSNames()
+	if err != nil {
+		return URI{}, fmt.Errorf("retrieve service connect DNS names: %w", err)
+	}
+	if len(scDNSNames) > 0 {
+		return URI{
+			URI:        english.OxfordWordSeries(scDNSNames, "or"),
+			AccessType: URIAccessTypeServiceConnect,
 		}, nil
 	}
 	endpoint, err := envDescr.ServiceDiscoveryEndpoint()
@@ -205,7 +225,7 @@ func (d *BackendServiceDescriber) URI(envName string) (URI, error) {
 	}
 	s := serviceDiscovery{
 		Service:  d.svc,
-		Port:     port,
+		Port:     svcStackParams[stack.WorkloadTargetPortParamKey],
 		Endpoint: endpoint,
 	}
 	return URI{
@@ -258,18 +278,17 @@ func (d *uriDescriber) uri() (accessURI, error) {
 		return d.envDNSName(path)
 	}
 
-	svcResources, err := d.svcDescriber.ServiceStackResources()
+	svcResources, err := d.svcDescriber.StackResources()
 	if err != nil {
 		return accessURI{}, fmt.Errorf("get stack resources for service %s: %w", d.svc, err)
 	}
 
-	var ruleARN string
+	var ruleARNs []string
 	for _, resource := range svcResources {
 		if resource.Type == svcStackResourceListenerRuleResourceType &&
-			((httpsEnabled && resource.LogicalID == svcStackResourceHTTPSListenerRuleLogicalID) ||
-				(!httpsEnabled && resource.LogicalID == svcStackResourceHTTPListenerRuleLogicalID)) {
-			ruleARN = resource.PhysicalID
-			break
+			((httpsEnabled && strings.HasPrefix(resource.LogicalID, svcStackResourceHTTPSListenerRuleLogicalID)) ||
+				(!httpsEnabled && strings.HasPrefix(resource.LogicalID, svcStackResourceHTTPListenerRuleLogicalID))) {
+			ruleARNs = append(ruleARNs, resource.PhysicalID)
 		}
 	}
 
@@ -277,9 +296,9 @@ func (d *uriDescriber) uri() (accessURI, error) {
 	if err != nil {
 		return accessURI{}, nil
 	}
-	dnsNames, err := lbDescr.ListenerRuleHostHeaders(ruleARN)
+	dnsNames, err := lbDescr.ListenerRulesHostHeaders(ruleARNs)
 	if err != nil {
-		return accessURI{}, fmt.Errorf("get host headers for listener rule %s: %w", ruleARN, err)
+		return accessURI{}, fmt.Errorf("get host headers for listener rules %s: %w", strings.Join(ruleARNs, ","), err)
 	}
 	if len(dnsNames) == 0 {
 		return d.envDNSName(path)
@@ -315,12 +334,22 @@ func (d *RDWebServiceDescriber) URI(envName string) (URI, error) {
 
 	serviceURL, err := describer.ServiceURL()
 	if err != nil {
-		return URI{}, fmt.Errorf("get outputs for service %s: %w", d.svc, err)
+		return URI{}, fmt.Errorf("get outputs for service %q: %w", d.svc, err)
+	}
+
+	isPrivate, err := describer.IsPrivate()
+	if err != nil {
+		return URI{}, fmt.Errorf("check if service %q is private: %w", d.svc, err)
+	}
+
+	accessType := URIAccessTypeInternet
+	if isPrivate {
+		accessType = URIAccessTypeInternal
 	}
 
 	return URI{
 		URI:        serviceURL,
-		AccessType: URIAccessTypeInternet,
+		AccessType: accessType,
 	}, nil
 }
 
@@ -344,7 +373,7 @@ type nlbURI struct {
 func (u *LBWebServiceURI) String() string {
 	uris := u.access.strings()
 	for _, dnsName := range u.nlbURI.DNSNames {
-		uris = append(uris, fmt.Sprintf("%s:%s", dnsName, u.nlbURI.Port))
+		uris = append(uris, color.HighlightResource(fmt.Sprintf("%s:%s", dnsName, u.nlbURI.Port)))
 	}
 	return english.OxfordWordSeries(uris, "or")
 }
@@ -360,7 +389,7 @@ func (u *accessURI) strings() []string {
 		if u.Path != "/" {
 			path = fmt.Sprintf("/%s", u.Path)
 		}
-		uris = append(uris, protocol+dnsName+path)
+		uris = append(uris, color.HighlightResource(protocol+dnsName+path))
 	}
 	return uris
 }

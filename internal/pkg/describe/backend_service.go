@@ -10,13 +10,15 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/aws/copilot-cli/internal/pkg/aws/cloudwatch"
 	"github.com/aws/copilot-cli/internal/pkg/aws/elbv2"
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
 	"github.com/aws/copilot-cli/internal/pkg/docker/dockerengine"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
+	"github.com/aws/copilot-cli/internal/pkg/template"
 
 	cfnstack "github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/describe/stack"
-	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
 )
 
@@ -37,8 +39,10 @@ type BackendServiceDescriber struct {
 	initECSServiceDescribers func(string) (ecsDescriber, error)
 	initEnvDescribers        func(string) (envDescriber, error)
 	initLBDescriber          func(string) (lbDescriber, error)
+	initCWDescriber          func(string) (cwAlarmDescriber, error)
 	ecsServiceDescribers     map[string]ecsDescriber
 	envStackDescriber        map[string]envDescriber
+	cwAlarmDescribers        map[string]cwAlarmDescriber
 }
 
 // NewBackendServiceDescriber instantiates a backend service describer.
@@ -68,14 +72,29 @@ func NewBackendServiceDescriber(opt NewServiceConfig) (*BackendServiceDescriber,
 		}
 		svcDescr, err := newECSServiceDescriber(NewServiceConfig{
 			App:         opt.App,
+			Env:         env,
 			Svc:         opt.Svc,
 			ConfigStore: opt.ConfigStore,
-		}, env)
+		})
 		if err != nil {
 			return nil, err
 		}
 		describer.ecsServiceDescribers[env] = svcDescr
 		return svcDescr, nil
+	}
+	describer.initCWDescriber = func(envName string) (cwAlarmDescriber, error) {
+		if describer, ok := describer.cwAlarmDescribers[envName]; ok {
+			return describer, nil
+		}
+		env, err := opt.ConfigStore.GetEnvironment(opt.App, envName)
+		if err != nil {
+			return nil, fmt.Errorf("get environment %s: %w", envName, err)
+		}
+		sess, err := sessions.ImmutableProvider().FromRole(env.ManagerRoleARN, env.Region)
+		if err != nil {
+			return nil, err
+		}
+		return cloudwatch.New(sess), nil
 	}
 	describer.initEnvDescribers = func(env string) (envDescriber, error) {
 		if describer, ok := describer.envStackDescriber[env]; ok {
@@ -104,9 +123,11 @@ func (d *BackendServiceDescriber) Describe() (HumanJSONStringer, error) {
 
 	var routes []*WebServiceRoute
 	var configs []*ECSServiceConfig
-	var services []*ServiceDiscovery
+	sdEndpoints := make(serviceDiscoveries)
+	scEndpoints := make(serviceConnects)
 	var envVars []*containerEnvVar
 	var secrets []*secret
+	var alarmDescriptions []*cloudwatch.AlarmDescription
 	for _, env := range environments {
 		svcDescr, err := d.initECSServiceDescribers(env)
 		if err != nil {
@@ -131,25 +152,18 @@ func (d *BackendServiceDescriber) Describe() (HumanJSONStringer, error) {
 			return nil, err
 		}
 		port := blankContainerPort
-		if svcParams[cfnstack.WorkloadContainerPortParamKey] != cfnstack.NoExposedContainerPort {
-			endpoint, err := envDescr.ServiceDiscoveryEndpoint()
-			if err != nil {
+		if isReachableWithinVPC(svcParams) {
+			port = svcParams[cfnstack.WorkloadTargetPortParamKey]
+			if err := sdEndpoints.collectEndpoints(envDescr, d.svc, env, port); err != nil {
 				return nil, err
 			}
-			port = svcParams[cfnstack.WorkloadContainerPortParamKey]
-			services = appendServiceDiscovery(services, serviceDiscovery{
-				Service:  d.svc,
-				Port:     port,
-				Endpoint: endpoint,
-			}, env)
+			if err := scEndpoints.collectEndpoints(svcDescr, env); err != nil {
+				return nil, err
+			}
 		}
 		containerPlatform, err := svcDescr.Platform()
 		if err != nil {
 			return nil, fmt.Errorf("retrieve platform: %w", err)
-		}
-		backendSvcEnvVars, err := svcDescr.EnvVars()
-		if err != nil {
-			return nil, fmt.Errorf("retrieve environment variables: %w", err)
 		}
 		configs = append(configs, &ECSServiceConfig{
 			ServiceConfig: &ServiceConfig{
@@ -161,6 +175,28 @@ func (d *BackendServiceDescriber) Describe() (HumanJSONStringer, error) {
 			},
 			Tasks: svcParams[cfnstack.WorkloadTaskCountParamKey],
 		})
+		alarmNames, err := svcDescr.RollbackAlarmNames()
+		if err != nil {
+			return nil, fmt.Errorf("retrieve rollback alarm names: %w", err)
+		}
+		if len(alarmNames) != 0 {
+			cwAlarmDescr, err := d.initCWDescriber(env)
+			if err != nil {
+				return nil, err
+			}
+			alarmDescs, err := cwAlarmDescr.AlarmDescriptions(alarmNames)
+			if err != nil {
+				return nil, fmt.Errorf("retrieve alarm descriptions: %w", err)
+			}
+			for _, alarm := range alarmDescs {
+				alarm.Environment = env
+			}
+			alarmDescriptions = append(alarmDescriptions, alarmDescs...)
+		}
+		backendSvcEnvVars, err := svcDescr.EnvVars()
+		if err != nil {
+			return nil, fmt.Errorf("retrieve environment variables: %w", err)
+		}
 		envVars = append(envVars, flattenContainerEnvVars(env, backendSvcEnvVars)...)
 		webSvcSecrets, err := svcDescr.Secrets()
 		if err != nil {
@@ -176,7 +212,7 @@ func (d *BackendServiceDescriber) Describe() (HumanJSONStringer, error) {
 			if err != nil {
 				return nil, err
 			}
-			stackResources, err := svcDescr.ServiceStackResources()
+			stackResources, err := svcDescr.StackResources()
 			if err != nil {
 				return nil, fmt.Errorf("retrieve service resources: %w", err)
 			}
@@ -185,17 +221,21 @@ func (d *BackendServiceDescriber) Describe() (HumanJSONStringer, error) {
 	}
 
 	return &backendSvcDesc{
-		Service:          d.svc,
-		Type:             manifest.BackendServiceType,
-		App:              d.app,
-		Configurations:   configs,
-		Routes:           routes,
-		ServiceDiscovery: services,
-		Variables:        envVars,
-		Secrets:          secrets,
-		Resources:        resources,
+		ecsSvcDesc: ecsSvcDesc{
+			Service:           d.svc,
+			Type:              manifestinfo.BackendServiceType,
+			App:               d.app,
+			Configurations:    configs,
+			AlarmDescriptions: alarmDescriptions,
+			Routes:            routes,
+			ServiceDiscovery:  sdEndpoints,
+			ServiceConnect:    scEndpoints,
+			Variables:         envVars,
+			Secrets:           secrets,
+			Resources:         resources,
 
-		environments: environments,
+			environments: environments,
+		},
 	}, nil
 }
 
@@ -211,17 +251,7 @@ func (d *BackendServiceDescriber) Manifest(env string) ([]byte, error) {
 
 // backendSvcDesc contains serialized parameters for a backend service.
 type backendSvcDesc struct {
-	Service          string               `json:"service"`
-	Type             string               `json:"type"`
-	App              string               `json:"application"`
-	Configurations   ecsConfigurations    `json:"configurations"`
-	Routes           []*WebServiceRoute   `json:"routes"`
-	ServiceDiscovery serviceDiscoveries   `json:"serviceDiscovery"`
-	Variables        containerEnvVars     `json:"variables"`
-	Secrets          secrets              `json:"secrets,omitempty"`
-	Resources        deployedSvcResources `json:"resources,omitempty"`
-
-	environments []string `json:"-"`
+	ecsSvcDesc
 }
 
 // JSONString returns the stringified backendService struct with json format.
@@ -245,6 +275,11 @@ func (w *backendSvcDesc) HumanString() string {
 	fmt.Fprint(writer, color.Bold.Sprint("\nConfigurations\n\n"))
 	writer.Flush()
 	w.Configurations.humanString(writer)
+	if len(w.AlarmDescriptions) > 0 {
+		fmt.Fprint(writer, color.Bold.Sprint("\nRollback Alarms\n\n"))
+		writer.Flush()
+		rollbackAlarms(w.AlarmDescriptions).humanString(writer)
+	}
 	if len(w.Routes) > 0 {
 		fmt.Fprint(writer, color.Bold.Sprint("\nRoutes\n\n"))
 		writer.Flush()
@@ -255,9 +290,15 @@ func (w *backendSvcDesc) HumanString() string {
 			fmt.Fprintf(writer, "  %s\t%s\n", route.Environment, route.URL)
 		}
 	}
-	fmt.Fprint(writer, color.Bold.Sprint("\nService Discovery\n\n"))
-	writer.Flush()
-	w.ServiceDiscovery.humanString(writer)
+	if len(w.ServiceConnect) > 0 || len(w.ServiceDiscovery) > 0 {
+		fmt.Fprint(writer, color.Bold.Sprint("\nInternal Service Endpoints\n\n"))
+		writer.Flush()
+		endpoints := serviceEndpoints{
+			discoveries: w.ServiceDiscovery,
+			connects:    w.ServiceConnect,
+		}
+		endpoints.humanString(writer)
+	}
 	fmt.Fprint(writer, color.Bold.Sprint("\nVariables\n\n"))
 	writer.Flush()
 	w.Variables.humanString(writer)
@@ -274,4 +315,8 @@ func (w *backendSvcDesc) HumanString() string {
 	}
 	writer.Flush()
 	return b.String()
+}
+
+func isReachableWithinVPC(params map[string]string) bool {
+	return params[cfnstack.WorkloadTargetPortParamKey] != template.NoExposedContainerPort
 }

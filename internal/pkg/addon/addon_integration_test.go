@@ -8,7 +8,7 @@ package addon_test
 import (
 	"encoding"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -24,7 +24,7 @@ func TestAddons(t *testing.T) {
 		outFileName    string
 	}{
 		"aurora": {
-			addonMarshaler: addon.NewRDSTemplate(addon.RDSProps{
+			addonMarshaler: addon.WorkloadServerlessV2Template(addon.RDSProps{
 				ClusterName:   "aurora",
 				Engine:        "MySQL",
 				InitialDBName: "main",
@@ -33,7 +33,7 @@ func TestAddons(t *testing.T) {
 			outFileName: "aurora.yml",
 		},
 		"ddb": {
-			addonMarshaler: addon.NewDDBTemplate(&addon.DynamoDBProps{
+			addonMarshaler: addon.WorkloadDDBTemplate(&addon.DynamoDBProps{
 				StorageProps: &addon.StorageProps{
 					Name: "ddb",
 				},
@@ -65,7 +65,7 @@ func TestAddons(t *testing.T) {
 			outFileName: "ddb.yml",
 		},
 		"s3": {
-			addonMarshaler: addon.NewS3Template(&addon.S3Props{
+			addonMarshaler: addon.WorkloadS3Template(&addon.S3Props{
 				StorageProps: &addon.StorageProps{
 					Name: "bucket",
 				},
@@ -84,7 +84,7 @@ func TestAddons(t *testing.T) {
 			cfActual := make(map[interface{}]interface{})
 			require.NoError(t, yaml.Unmarshal(actualBytes, cfActual))
 
-			expected, err := ioutil.ReadFile(filepath.Join("testdata", "storage", tc.outFileName))
+			expected, err := os.ReadFile(filepath.Join("testdata", "storage", tc.outFileName))
 			require.NoError(t, err, "should be able to read expected bytes")
 			expectedBytes := []byte(expected)
 			mExpected := make(map[interface{}]interface{})

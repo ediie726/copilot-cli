@@ -2,10 +2,16 @@
 {{- range $topic := .Publish.Topics}}
 {{logicalIDSafe $topic.Name}}SNSTopic:
   Metadata:
-    'aws:copilot:description': 'A SNS topic to broadcast {{$topic.Name}} events'
+    'aws:copilot:description': {{ if $topic.FIFOTopicConfig }} 'A SNS FIFO topic to broadcast {{$topic.Name}} events' {{ else}} 'A SNS topic to broadcast {{$topic.Name}} events'{{ end}}
   Type: AWS::SNS::Topic
   Properties:
     TopicName: !Sub '${AWS::StackName}-{{$topic.Name}}'
+    {{- if $topic.FIFOTopicConfig }}
+    FifoTopic: true
+    {{- if $topic.FIFOTopicConfig.ContentBasedDeduplication }}
+    ContentBasedDeduplication: {{$topic.FIFOTopicConfig.ContentBasedDeduplication}}
+    {{- end }}
+    {{- end }}
     KmsMasterKeyId: 'alias/aws/sns'
 
 {{logicalIDSafe $topic.Name}}SNSTopicPolicy:

@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/copilot-cli/internal/pkg/aws/ecr"
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
+	clideploy "github.com/aws/copilot-cli/internal/pkg/cli/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
@@ -252,7 +253,7 @@ func (o *deleteJobOpts) deleteJobs(envs []*config.Environment) error {
 			return err
 		}
 		// Delete job stack
-		if err = o.deleteStack(sess, env.Name); err != nil {
+		if err = o.deleteStack(sess, env); err != nil {
 			return err
 		}
 		// Delete orphan tasks
@@ -263,12 +264,13 @@ func (o *deleteJobOpts) deleteJobs(envs []*config.Environment) error {
 	return nil
 }
 
-func (o *deleteJobOpts) deleteStack(sess *session.Session, env string) error {
+func (o *deleteJobOpts) deleteStack(sess *session.Session, env *config.Environment) error {
 	cfClient := o.newWlDeleter(sess)
 	if err := cfClient.DeleteWorkload(deploy.DeleteWorkloadInput{
-		Name:    o.name,
-		EnvName: env,
-		AppName: o.appName,
+		Name:             o.name,
+		EnvName:          env.Name,
+		AppName:          o.appName,
+		ExecutionRoleARN: env.ExecutionRoleARN,
 	}); err != nil {
 		return fmt.Errorf("delete job stack: %w", err)
 	}
@@ -302,8 +304,7 @@ func (o *deleteJobOpts) emptyECRRepos(envs []*config.Environment) error {
 		}
 	}
 
-	// TODO: centralized ECR repo name
-	repoName := fmt.Sprintf("%s/%s", o.appName, o.name)
+	repoName := clideploy.RepoName(o.appName, o.name)
 	for _, region := range uniqueRegions {
 		sess, err := o.sess.DefaultWithRegion(region)
 		if err != nil {

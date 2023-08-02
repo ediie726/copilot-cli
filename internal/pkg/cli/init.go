@@ -10,7 +10,11 @@ import (
 	"os"
 
 	awscfn "github.com/aws/copilot-cli/internal/pkg/aws/cloudformation"
+	"github.com/aws/copilot-cli/internal/pkg/aws/iam"
+	"github.com/aws/copilot-cli/internal/pkg/describe"
 	"github.com/aws/copilot-cli/internal/pkg/docker/dockerfile"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/docker/dockerengine"
@@ -88,14 +92,12 @@ type initOpts struct {
 
 	prompt prompter
 
-	setupWorkloadInit func(*initOpts, string) error
+	setupWorkloadInit           func(*initOpts, string) error
+	useExistingWorkspaceForCMDs func(*initOpts) error
 }
 
 func newInitOpts(vars initVars) (*initOpts, error) {
-	ws, err := workspace.New()
-	if err != nil {
-		return nil, err
-	}
+	fs := afero.NewOsFs()
 	sessProvider := sessions.ImmutableProvider(sessions.UserAgentExtras("init"))
 	defaultSess, err := sessProvider.Default()
 	if err != nil {
@@ -103,7 +105,6 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 	}
 	configStore := config.NewSSMStore(identity.New(defaultSess), ssm.New(defaultSess), aws.StringValue(defaultSess.Config.Region))
 	prompt := prompt.New()
-	sel := selector.NewLocalWorkloadSelector(prompt, configStore, ws)
 	deployStore, err := deploy.NewStore(sessProvider, configStore)
 	if err != nil {
 		return nil, err
@@ -112,15 +113,12 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 	spin := termprogress.NewSpinner(log.DiagnosticWriter)
 	id := identity.New(defaultSess)
 	deployer := cloudformation.New(defaultSess, cloudformation.WithProgressTracker(os.Stderr))
-	if err != nil {
-		return nil, err
-	}
+	iamClient := iam.New(defaultSess)
 	initAppCmd := &initAppOpts{
 		initAppVars: initAppVars{
 			name: vars.appName,
 		},
 		store:    configStore,
-		ws:       ws,
 		prompt:   prompt,
 		identity: id,
 		cfn:      deployer,
@@ -128,54 +126,64 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 		isSessionFromEnvVars: func() (bool, error) {
 			return sessions.AreCredsFromEnvVars(defaultSess)
 		},
+		existingWorkspace: func() (wsAppManager, error) {
+			return workspace.Use(fs)
+		},
+		newWorkspace: func(appName string) (wsAppManager, error) {
+			return workspace.Create(appName, fs)
+		},
+		iam:            iamClient,
+		iamRoleManager: iamClient,
 	}
 	initEnvCmd := &initEnvOpts{
 		initEnvVars: initEnvVars{
-			appName:      vars.appName,
 			name:         defaultEnvironmentName,
 			isProduction: false,
 		},
-		store:          configStore,
-		appDeployer:    deployer,
-		prog:           spin,
-		prompt:         prompt,
-		identity:       id,
-		appCFN:         cloudformation.New(defaultSess, cloudformation.WithProgressTracker(os.Stderr)),
-		manifestWriter: ws,
-
-		sess: defaultSess,
+		store:       configStore,
+		appDeployer: deployer,
+		prog:        spin,
+		prompt:      prompt,
+		identity:    id,
+		newAppVersionGetter: func(appName string) (versionGetter, error) {
+			return describe.NewAppDescriber(appName)
+		},
+		appCFN:          cloudformation.New(defaultSess, cloudformation.WithProgressTracker(os.Stderr)),
+		sess:            defaultSess,
+		templateVersion: version.LatestTemplateVersion(),
 	}
 	deployEnvCmd := &deployEnvOpts{
 		deployEnvVars: deployEnvVars{
-			appName: vars.appName,
-			name:    defaultEnvironmentName,
+			name: defaultEnvironmentName,
 		},
 		store:           configStore,
 		sessionProvider: sessProvider,
-		ws:              ws,
 		identity:        id,
+		fs:              fs,
 		newInterpolator: newManifestInterpolator,
+		newEnvVersionGetter: func(appName, envName string) (versionGetter, error) {
+			return describe.NewEnvDescriber(describe.NewEnvDescriberConfig{
+				App:         appName,
+				Env:         envName,
+				ConfigStore: configStore,
+			})
+		},
+		templateVersion: version.LatestTemplateVersion(),
 	}
-	deployEnvCmd.newEnvDeployer = func() (envDeployer, error) {
-		return newEnvDeployer(deployEnvCmd)
-	}
-
 	deploySvcCmd := &deploySvcOpts{
 		deployWkldVars: deployWkldVars{
 			envName:  defaultEnvironmentName,
 			imageTag: vars.imageTag,
-			appName:  vars.appName,
 		},
 
 		store:           configStore,
 		prompt:          prompt,
-		ws:              ws,
 		newInterpolator: newManifestInterpolator,
 		unmarshal:       manifest.UnmarshalWorkload,
-		sel:             sel,
 		spinner:         spin,
 		cmd:             exec.NewCmd(),
 		sessProvider:    sessProvider,
+		templateVersion: version.LatestTemplateVersion(),
 	}
 	deploySvcCmd.newSvcDeployer = func() (workloadDeployer, error) {
 		return newSvcDeployer(deploySvcCmd)
@@ -184,21 +192,43 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 		deployWkldVars: deployWkldVars{
 			envName:  defaultEnvironmentName,
 			imageTag: vars.imageTag,
-			appName:  vars.appName,
 		},
 		store:           configStore,
-		ws:              ws,
 		newInterpolator: newManifestInterpolator,
 		unmarshal:       manifest.UnmarshalWorkload,
-		sel:             sel,
 		cmd:             exec.NewCmd(),
 		sessProvider:    sessProvider,
+		templateVersion: version.LatestTemplateVersion(),
 	}
 	deployJobCmd.newJobDeployer = func() (workloadDeployer, error) {
 		return newJobDeployer(deployJobCmd)
 	}
-	fs := &afero.Afero{Fs: afero.NewOsFs()}
+
 	cmd := exec.NewCmd()
+
+	useExistingWorkspaceClient := func(o *initOpts) error {
+		ws, err := workspace.Use(fs)
+		if err != nil {
+			return err
+		}
+		sel := selector.NewLocalWorkloadSelector(prompt, configStore, ws)
+		initEnvCmd.manifestWriter = ws
+		deployEnvCmd.ws = ws
+		deployEnvCmd.newEnvDeployer = func() (envDeployer, error) {
+			return newEnvDeployer(deployEnvCmd, ws)
+		}
+		deploySvcCmd.ws = ws
+		deploySvcCmd.sel = sel
+		deployJobCmd.ws = ws
+		deployJobCmd.sel = sel
+		if initWkCmd, ok := o.initWlCmd.(*initSvcOpts); ok {
+			initWkCmd.init = &initialize.WorkloadInitializer{Store: configStore, Ws: ws, Prog: spin, Deployer: deployer}
+		}
+		if initWkCmd, ok := o.initWlCmd.(*initJobOpts); ok {
+			initWkCmd.init = &initialize.WorkloadInitializer{Store: configStore, Ws: ws, Prog: spin, Deployer: deployer}
+		}
+		return nil
+	}
 	return &initOpts{
 		initVars:     vars,
 		ShouldDeploy: vars.shouldDeploy,
@@ -214,7 +244,6 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 		prompt: prompt,
 
 		setupWorkloadInit: func(o *initOpts, wkldType string) error {
-			wlInitializer := &initialize.WorkloadInitializer{Store: configStore, Ws: ws, Prog: spin, Deployer: deployer}
 			wkldVars := initWkldVars{
 				appName:        *o.appName,
 				wkldType:       wkldType,
@@ -222,8 +251,12 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 				dockerfilePath: vars.dockerfilePath,
 				image:          vars.image,
 			}
+			dfSel, err := selector.NewDockerfileSelector(prompt, fs)
+			if err != nil {
+				return fmt.Errorf("initiate dockerfile selector: %w", err)
+			}
 			switch t := wkldType; {
-			case t == manifest.ScheduledJobType:
+			case manifestinfo.IsTypeAJob(t):
 				jobVars := initJobVars{
 					initWkldVars: wkldVars,
 					schedule:     vars.schedule,
@@ -234,38 +267,55 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 				opts := initJobOpts{
 					initJobVars: jobVars,
 
-					fs:                fs,
-					store:             configStore,
-					init:              wlInitializer,
-					sel:               selector.NewWorkspaceSelector(prompt, ws),
-					prompt:            prompt,
-					mftReader:         ws,
+					fs:               fs,
+					store:            configStore,
+					dockerfileSel:    dfSel,
+					scheduleSelector: selector.NewStaticSelector(prompt),
+					prompt:           prompt,
+					newAppVersionGetter: func(appName string) (versionGetter, error) {
+						return describe.NewAppDescriber(appName)
+					},
 					dockerEngine:      dockerengine.New(cmd),
 					wsPendingCreation: true,
 					initParser: func(s string) dockerfileParser {
 						return dockerfile.New(fs, s)
 					},
+					templateVersion: version.LatestTemplateVersion(),
+					initEnvDescriber: func(appName string, envName string) (envDescriber, error) {
+						envDescriber, err := describe.NewEnvDescriber(describe.NewEnvDescriberConfig{
+							App:         appName,
+							Env:         envName,
+							ConfigStore: configStore,
+						})
+						if err != nil {
+							return nil, err
+						}
+						return envDescriber, nil
+					},
 				}
 				o.initWlCmd = &opts
 				o.schedule = &opts.schedule // Surfaced via pointer for logging
 				o.initWkldVars = &opts.initWkldVars
-			case manifest.IsTypeAService(t):
+			case manifestinfo.IsTypeAService(t):
 				svcVars := initSvcVars{
 					initWkldVars: wkldVars,
 					port:         vars.port,
+					ingressType:  ingressTypeInternet,
 				}
 				opts := initSvcOpts{
 					initSvcVars: svcVars,
 
-					fs:                fs,
-					init:              wlInitializer,
-					sel:               selector.NewWorkspaceSelector(prompt, ws),
-					store:             configStore,
-					topicSel:          snsSel,
-					mftReader:         ws,
-					prompt:            prompt,
+					fs:       fs,
+					sel:      dfSel,
+					store:    configStore,
+					topicSel: snsSel,
+					prompt:   prompt,
+					newAppVersionGetter: func(appName string) (versionGetter, error) {
+						return describe.NewAppDescriber(appName)
+					},
 					dockerEngine:      dockerengine.New(cmd),
 					wsPendingCreation: true,
+					templateVersion:   version.LatestTemplateVersion(),
 				}
 				opts.dockerfile = func(path string) dockerfileParser {
 					if opts.df != nil {
@@ -273,6 +323,17 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 					}
 					opts.df = dockerfile.New(opts.fs, opts.dockerfilePath)
 					return opts.df
+				}
+				opts.initEnvDescriber = func(appName string, envName string) (envDescriber, error) {
+					envDescriber, err := describe.NewEnvDescriber(describe.NewEnvDescriberConfig{
+						App:         appName,
+						Env:         envName,
+						ConfigStore: opts.store,
+					})
+					if err != nil {
+						return nil, err
+					}
+					return envDescriber, nil
 				}
 				o.initWlCmd = &opts
 				o.port = &opts.port // Surfaced via pointer for logging.
@@ -282,6 +343,7 @@ func newInitOpts(vars initVars) (*initOpts, error) {
 			}
 			return nil
 		},
+		useExistingWorkspaceForCMDs: useExistingWorkspaceClient,
 	}, nil
 }
 
@@ -309,6 +371,9 @@ containerized services that operate together.`))
 	if err := o.initAppCmd.Execute(); err != nil {
 		return fmt.Errorf("execute app init: %w", err)
 	}
+	if err := o.useExistingWorkspaceForCMDs(o); err != nil {
+		return fmt.Errorf("set up workspace client for commands: %w", err)
+	}
 	if err := o.initWlCmd.Execute(); err != nil {
 		return fmt.Errorf("execute %s init: %w", o.wkldType, err)
 	}
@@ -320,20 +385,16 @@ containerized services that operate together.`))
 }
 
 func (o *initOpts) logWorkloadTypeAck() {
-	if o.initWkldVars.wkldType == manifest.ScheduledJobType {
+	if manifestinfo.IsTypeAJob(o.initWkldVars.wkldType) {
 		log.Infof("Ok great, we'll set up a %s named %s in application %s running on the schedule %s.\n",
 			color.HighlightUserInput(o.initWkldVars.wkldType), color.HighlightUserInput(o.initWkldVars.name), color.HighlightUserInput(o.initWkldVars.appName), color.HighlightUserInput(*o.schedule))
 		return
 	}
-	if aws.Uint16Value(o.port) != 0 {
-		log.Infof("Ok great, we'll set up a %s named %s in application %s listening on port %s.\n", color.HighlightUserInput(o.initWkldVars.wkldType), color.HighlightUserInput(o.initWkldVars.name), color.HighlightUserInput(o.initWkldVars.appName), color.HighlightUserInput(fmt.Sprintf("%d", *o.port)))
-	} else {
-		log.Infof("Ok great, we'll set up a %s named %s in application %s.\n", color.HighlightUserInput(o.initWkldVars.wkldType), color.HighlightUserInput(o.initWkldVars.name), color.HighlightUserInput(o.initWkldVars.appName))
-	}
+	log.Infof("Ok great, we'll set up a %s named %s in application %s.\n", color.HighlightUserInput(o.initWkldVars.wkldType), color.HighlightUserInput(o.initWkldVars.name), color.HighlightUserInput(o.initWkldVars.appName))
 }
 
 func (o *initOpts) deploy() error {
-	if o.initWkldVars.wkldType == manifest.ScheduledJobType {
+	if manifestinfo.IsTypeAJob(o.initWkldVars.wkldType) {
 		return o.deployJob()
 	}
 	return o.deploySvc()

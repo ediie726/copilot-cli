@@ -6,7 +6,7 @@
 package stack_test
 
 import (
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -55,6 +55,7 @@ func TestCC_Pipeline_Template(t *testing.T) {
 			},
 		},
 		AdditionalTags: nil,
+		Version:        "v1.28.0",
 	})
 
 	actual, err := ps.Template()
@@ -63,7 +64,7 @@ func TestCC_Pipeline_Template(t *testing.T) {
 	m1 := make(map[interface{}]interface{})
 	require.NoError(t, yaml.Unmarshal(actualInBytes, m1))
 
-	wanted, err := ioutil.ReadFile(filepath.Join("testdata", "pipeline", "cc_template.yaml"))
+	wanted, err := os.ReadFile(filepath.Join("testdata", "pipeline", "cc_template.yaml"))
 	require.NoError(t, err, "should be able to read expected template file")
 	wantedInBytes := []byte(wanted)
 	m2 := make(map[interface{}]interface{})

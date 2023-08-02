@@ -8,17 +8,16 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/dustin/go-humanize"
-
 	"github.com/aws/aws-sdk-go/aws"
 	awsecs "github.com/aws/copilot-cli/internal/pkg/aws/ecs"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/ecs"
-	"github.com/aws/copilot-cli/internal/pkg/manifest"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/term/prompt"
 	"github.com/aws/copilot-cli/internal/pkg/term/selector/mocks"
 	"github.com/aws/copilot-cli/internal/pkg/workspace"
+	"github.com/dustin/go-humanize"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +25,7 @@ import (
 type deploySelectMocks struct {
 	deploySvc *mocks.MockdeployedWorkloadsRetriever
 	configSvc *mocks.MockconfigLister
-	prompt    *mocks.Mockprompter
+	prompt    *mocks.MockPrompter
 }
 
 func TestDeploySelect_Topics(t *testing.T) {
@@ -99,7 +98,7 @@ func TestDeploySelect_Topics(t *testing.T) {
 
 			mockdeploySvc := mocks.NewMockdeployedWorkloadsRetriever(ctrl)
 			mockconfigSvc := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := deploySelectMocks{
 				deploySvc: mockdeploySvc,
 				configSvc: mockconfigSvc,
@@ -208,12 +207,14 @@ func TestDeploySelect_Service(t *testing.T) {
 		env        string
 		opts       []GetDeployedWorkloadOpts
 
-		wantErr error
-		wantEnv string
-		wantSvc string
+		wantErr     error
+		wantEnv     string
+		wantSvc     string
+		wantSvcType string
 	}{
 		"return error if fail to retrieve environment": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -224,6 +225,7 @@ func TestDeploySelect_Service(t *testing.T) {
 		},
 		"return error if fail to list deployed services": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -242,6 +244,7 @@ func TestDeploySelect_Service(t *testing.T) {
 		},
 		"return error if no deployed services found": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -260,6 +263,7 @@ func TestDeploySelect_Service(t *testing.T) {
 		},
 		"return error if fail to select": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -283,6 +287,18 @@ func TestDeploySelect_Service(t *testing.T) {
 		},
 		"success": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{
+					{
+						App:  testApp,
+						Name: "mockSvc1",
+						Type: "mockSvcType1",
+					},
+					{
+						App:  testApp,
+						Name: "mockSvc2",
+						Type: "mockSvcType2",
+					},
+				}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -302,11 +318,19 @@ func TestDeploySelect_Service(t *testing.T) {
 					SelectOne("Select a deployed service", "Help text", []string{"mockSvc1 (test)", "mockSvc2 (test)"}, gomock.Any()).
 					Return("mockSvc1 (test)", nil)
 			},
-			wantEnv: "test",
-			wantSvc: "mockSvc1",
+			wantEnv:     "test",
+			wantSvc:     "mockSvc1",
+			wantSvcType: "mockSvcType1",
 		},
 		"skip with only one deployed service": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{
+					{
+						App:  testApp,
+						Name: "mockSvc",
+						Type: "mockSvcType",
+					},
+				}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -321,13 +345,15 @@ func TestDeploySelect_Service(t *testing.T) {
 					ListDeployedServices(testApp, "test").
 					Return([]string{"mockSvc"}, nil)
 			},
-			wantEnv: "test",
-			wantSvc: "mockSvc",
+			wantEnv:     "test",
+			wantSvc:     "mockSvc",
+			wantSvcType: "mockSvcType",
 		},
 		"return error if fail to check if service passed in by flag is deployed or not": {
 			env: "test",
 			svc: "mockSvc",
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.deploySvc.
 					EXPECT().
 					IsServiceDeployed(testApp, "test", "mockSvc").
@@ -339,6 +365,7 @@ func TestDeploySelect_Service(t *testing.T) {
 			env: "test",
 			svc: "mockSvc",
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.deploySvc.
 					EXPECT().
 					IsServiceDeployed(testApp, "test", "mockSvc").
@@ -352,7 +379,7 @@ func TestDeploySelect_Service(t *testing.T) {
 				WithWkldFilter(func(svc *DeployedWorkload) (bool, error) {
 					return svc.Env == "test1", nil
 				}),
-				WithServiceTypesFilter([]string{manifest.BackendServiceType}),
+				WithServiceTypesFilter([]string{manifestinfo.BackendServiceType}),
 			},
 			setupMocks: func(m deploySelectMocks) {
 				m.configSvc.
@@ -362,22 +389,22 @@ func TestDeploySelect_Service(t *testing.T) {
 						{
 							App:  testApp,
 							Name: "mockSvc1",
-							Type: manifest.BackendServiceType,
+							Type: manifestinfo.BackendServiceType,
 						},
 						{
 							App:  testApp,
 							Name: "mockSvc2",
-							Type: manifest.BackendServiceType,
+							Type: manifestinfo.BackendServiceType,
 						},
 						{
 							App:  testApp,
 							Name: "mockSvc3",
-							Type: manifest.LoadBalancedWebServiceType,
+							Type: manifestinfo.LoadBalancedWebServiceType,
 						},
 						{
 							App:  testApp,
 							Name: "mockJob1",
-							Type: manifest.ScheduledJobType,
+							Type: manifestinfo.ScheduledJobType,
 						},
 					}, nil)
 
@@ -404,8 +431,9 @@ func TestDeploySelect_Service(t *testing.T) {
 					SelectOne("Select a deployed service", "Help text", []string{"mockSvc1 (test1)", "mockSvc2 (test1)"}, gomock.Any()).
 					Return("mockSvc1 (test1)", nil)
 			},
-			wantEnv: "test1",
-			wantSvc: "mockSvc1",
+			wantEnv:     "test1",
+			wantSvc:     "mockSvc1",
+			wantSvcType: manifestinfo.BackendServiceType,
 		},
 		"filter returns error": {
 			opts: []GetDeployedWorkloadOpts{
@@ -421,17 +449,17 @@ func TestDeploySelect_Service(t *testing.T) {
 						{
 							App:  testApp,
 							Name: "mockSvc1",
-							Type: manifest.BackendServiceType,
+							Type: manifestinfo.BackendServiceType,
 						},
 						{
 							App:  testApp,
 							Name: "mockSvc2",
-							Type: manifest.BackendServiceType,
+							Type: manifestinfo.BackendServiceType,
 						},
 						{
 							App:  testApp,
 							Name: "mockSvc3",
-							Type: manifest.LoadBalancedWebServiceType,
+							Type: manifestinfo.LoadBalancedWebServiceType,
 						},
 					}, nil)
 
@@ -464,7 +492,7 @@ func TestDeploySelect_Service(t *testing.T) {
 
 			mockdeploySvc := mocks.NewMockdeployedWorkloadsRetriever(ctrl)
 			mockconfigSvc := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := deploySelectMocks{
 				deploySvc: mockdeploySvc,
 				configSvc: mockconfigSvc,
@@ -489,6 +517,7 @@ func TestDeploySelect_Service(t *testing.T) {
 				require.EqualError(t, err, tc.wantErr.Error())
 			} else {
 				require.Equal(t, tc.wantSvc, gotDeployed.Name)
+				require.Equal(t, tc.wantSvcType, gotDeployed.SvcType)
 				require.Equal(t, tc.wantEnv, gotDeployed.Env)
 			}
 		})
@@ -509,6 +538,7 @@ func TestDeploySelect_Job(t *testing.T) {
 	}{
 		"return error if fail to retrieve environment": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -519,6 +549,7 @@ func TestDeploySelect_Job(t *testing.T) {
 		},
 		"return error if fail to list deployed job": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -537,6 +568,7 @@ func TestDeploySelect_Job(t *testing.T) {
 		},
 		"return error if no deployed jobs found": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -555,6 +587,7 @@ func TestDeploySelect_Job(t *testing.T) {
 		},
 		"return error if fail to select": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -578,6 +611,7 @@ func TestDeploySelect_Job(t *testing.T) {
 		},
 		"success": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -602,6 +636,7 @@ func TestDeploySelect_Job(t *testing.T) {
 		},
 		"skip with only one deployed job": {
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.configSvc.
 					EXPECT().
 					ListEnvironments(testApp).
@@ -623,6 +658,7 @@ func TestDeploySelect_Job(t *testing.T) {
 			env: "test",
 			job: "mockJob",
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.deploySvc.
 					EXPECT().
 					IsJobDeployed(testApp, "test", "mockJob").
@@ -634,6 +670,7 @@ func TestDeploySelect_Job(t *testing.T) {
 			env: "test",
 			job: "mockJob",
 			setupMocks: func(m deploySelectMocks) {
+				m.configSvc.EXPECT().ListWorkloads(testApp).Return([]*config.Workload{}, nil)
 				m.deploySvc.
 					EXPECT().
 					IsJobDeployed(testApp, "test", "mockJob").
@@ -647,7 +684,7 @@ func TestDeploySelect_Job(t *testing.T) {
 				WithWkldFilter(func(job *DeployedWorkload) (bool, error) {
 					return job.Env == "test2", nil
 				}),
-				WithServiceTypesFilter([]string{manifest.ScheduledJobType}),
+				WithServiceTypesFilter([]string{manifestinfo.ScheduledJobType}),
 			},
 			setupMocks: func(m deploySelectMocks) {
 				m.configSvc.
@@ -657,22 +694,22 @@ func TestDeploySelect_Job(t *testing.T) {
 						{
 							App:  testApp,
 							Name: "mockSvc1",
-							Type: manifest.BackendServiceType,
+							Type: manifestinfo.BackendServiceType,
 						},
 						{
 							App:  testApp,
 							Name: "mockSvc2",
-							Type: manifest.BackendServiceType,
+							Type: manifestinfo.BackendServiceType,
 						},
 						{
 							App:  testApp,
 							Name: "mockJob1",
-							Type: manifest.ScheduledJobType,
+							Type: manifestinfo.ScheduledJobType,
 						},
 						{
 							App:  testApp,
 							Name: "mockJob2",
-							Type: manifest.ScheduledJobType,
+							Type: manifestinfo.ScheduledJobType,
 						},
 					}, nil)
 
@@ -716,17 +753,17 @@ func TestDeploySelect_Job(t *testing.T) {
 						{
 							App:  testApp,
 							Name: "mockJob1",
-							Type: manifest.ScheduledJobType,
+							Type: manifestinfo.ScheduledJobType,
 						},
 						{
 							App:  testApp,
 							Name: "mockJob2",
-							Type: manifest.ScheduledJobType,
+							Type: manifestinfo.ScheduledJobType,
 						},
 						{
 							App:  testApp,
 							Name: "mockSvc3",
-							Type: manifest.LoadBalancedWebServiceType,
+							Type: manifestinfo.LoadBalancedWebServiceType,
 						},
 					}, nil)
 
@@ -759,7 +796,7 @@ func TestDeploySelect_Job(t *testing.T) {
 
 			mockdeploySvc := mocks.NewMockdeployedWorkloadsRetriever(ctrl)
 			mockconfigSvc := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := deploySelectMocks{
 				deploySvc: mockdeploySvc,
 				configSvc: mockconfigSvc,
@@ -793,7 +830,7 @@ func TestDeploySelect_Job(t *testing.T) {
 
 type workspaceSelectMocks struct {
 	ws           *mocks.MockworkspaceRetriever
-	prompt       *mocks.Mockprompter
+	prompt       *mocks.MockPrompter
 	configLister *mocks.MockconfigLister
 }
 
@@ -1052,7 +1089,7 @@ func TestWorkspaceSelect_Service(t *testing.T) {
 
 			mockwsRetriever := mocks.NewMockworkspaceRetriever(ctrl)
 			MockconfigLister := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := workspaceSelectMocks{
 				ws:           mockwsRetriever,
 				configLister: MockconfigLister,
@@ -1350,7 +1387,7 @@ func TestWorkspaceSelect_Job(t *testing.T) {
 
 			mockwsRetriever := mocks.NewMockworkspaceRetriever(ctrl)
 			MockconfigLister := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := workspaceSelectMocks{
 				ws:           mockwsRetriever,
 				configLister: MockconfigLister,
@@ -1567,7 +1604,7 @@ func TestWorkspaceSelect_EnvironmentsInWorkspace(t *testing.T) {
 			m := workspaceSelectMocks{
 				ws:           mocks.NewMockworkspaceRetriever(ctrl),
 				configLister: mocks.NewMockconfigLister(ctrl),
-				prompt:       mocks.NewMockprompter(ctrl),
+				prompt:       mocks.NewMockPrompter(ctrl),
 			}
 			tc.setupMocks(m)
 
@@ -1591,7 +1628,7 @@ func TestWorkspaceSelect_EnvironmentsInWorkspace(t *testing.T) {
 
 type configSelectMocks struct {
 	workloadLister *mocks.MockconfigLister
-	prompt         *mocks.Mockprompter
+	prompt         *mocks.MockPrompter
 }
 
 func TestConfigSelect_Service(t *testing.T) {
@@ -1701,7 +1738,7 @@ func TestConfigSelect_Service(t *testing.T) {
 			defer ctrl.Finish()
 
 			mockconfigLister := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := configSelectMocks{
 				workloadLister: mockconfigLister,
 				prompt:         mockprompt,
@@ -1832,7 +1869,7 @@ func TestConfigSelect_Job(t *testing.T) {
 			defer ctrl.Finish()
 
 			mockconfigLister := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := configSelectMocks{
 				workloadLister: mockconfigLister,
 				prompt:         mockprompt,
@@ -1856,9 +1893,120 @@ func TestConfigSelect_Job(t *testing.T) {
 	}
 }
 
+func TestConfigSelect_Workload(t *testing.T) {
+	appName := "myapp"
+	testCases := map[string]struct {
+		setupMocks func(m configSelectMocks)
+		wantErr    error
+		want       string
+	}{
+		"with no workloads": {
+			setupMocks: func(m configSelectMocks) {
+				m.workloadLister.EXPECT().ListServices(gomock.Eq(appName)).Return([]*config.Workload{}, nil)
+				m.workloadLister.EXPECT().ListJobs(gomock.Eq(appName)).Return([]*config.Workload{}, nil)
+				m.prompt.EXPECT().SelectOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+			},
+			wantErr: fmt.Errorf("no workloads found in app myapp"),
+		},
+		"with only one service (skips prompting)": {
+			setupMocks: func(m configSelectMocks) {
+				m.workloadLister.EXPECT().ListServices(gomock.Eq(appName)).Return([]*config.Workload{
+					{
+						App:  appName,
+						Name: "service1",
+						Type: "load balanced web service",
+					},
+				}, nil)
+				m.workloadLister.EXPECT().ListJobs(gomock.Eq(appName)).Return([]*config.Workload{}, nil)
+				m.prompt.EXPECT().SelectOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+			},
+			want: "service1",
+		},
+		"with multiple workloads": {
+			setupMocks: func(m configSelectMocks) {
+				m.workloadLister.EXPECT().ListServices(gomock.Eq(appName)).Return([]*config.Workload{
+					{
+						App:  appName,
+						Name: "service1",
+						Type: "load balanced web service",
+					},
+					{
+						App:  appName,
+						Name: "service2",
+						Type: "backend service",
+					},
+				}, nil)
+				m.workloadLister.EXPECT().ListJobs(gomock.Eq(appName)).Return([]*config.Workload{
+					{
+						App:  appName,
+						Name: "job1",
+						Type: "scheduled job",
+					},
+				}, nil)
+				m.prompt.EXPECT().SelectOne(gomock.Any(), gomock.Any(), gomock.Eq([]string{"service1", "service2", "job1"}), gomock.Any()).Return("service2", nil).Times(1)
+			},
+			want: "service2",
+		},
+		"with error selecting services": {
+			setupMocks: func(m configSelectMocks) {
+				m.workloadLister.EXPECT().ListServices(gomock.Eq(appName)).Return([]*config.Workload{
+					{
+						App:  appName,
+						Name: "service1",
+						Type: "load balanced web service",
+					},
+					{
+						App:  appName,
+						Name: "service2",
+						Type: "backend service",
+					},
+				}, nil)
+				m.workloadLister.EXPECT().ListJobs(gomock.Eq(appName)).Return([]*config.Workload{
+					{
+						App:  appName,
+						Name: "job1",
+						Type: "scheduled job",
+					},
+				}, nil)
+				m.prompt.EXPECT().SelectOne(gomock.Any(), gomock.Any(), gomock.Eq([]string{"service1", "service2", "job1"}), gomock.Any()).Return("", errors.New("some error")).Times(1)
+			},
+			wantErr: fmt.Errorf("select workload: some error"),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockconfigLister := mocks.NewMockconfigLister(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
+			mocks := configSelectMocks{
+				workloadLister: mockconfigLister,
+				prompt:         mockprompt,
+			}
+			tc.setupMocks(mocks)
+
+			sel := ConfigSelector{
+				AppEnvSelector: &AppEnvSelector{
+					prompt: mockprompt,
+				},
+				workloadLister: mockconfigLister,
+			}
+
+			got, err := sel.Workload("Select a service", "Help text", appName)
+			if tc.wantErr != nil {
+				require.EqualError(t, err, tc.wantErr.Error())
+			} else {
+				require.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
+
 type environmentMocks struct {
 	envLister *mocks.MockconfigLister
-	prompt    *mocks.Mockprompter
+	prompt    *mocks.MockPrompter
 }
 
 func TestSelect_Environment(t *testing.T) {
@@ -2000,7 +2148,7 @@ func TestSelect_Environment(t *testing.T) {
 			defer ctrl.Finish()
 
 			mockenvLister := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := environmentMocks{
 				envLister: mockenvLister,
 				prompt:    mockprompt,
@@ -2207,7 +2355,7 @@ func TestSelect_Environments(t *testing.T) {
 			defer ctrl.Finish()
 
 			mockenvLister := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := environmentMocks{
 				envLister: mockenvLister,
 				prompt:    mockprompt,
@@ -2233,7 +2381,7 @@ func TestSelect_Environments(t *testing.T) {
 
 type applicationMocks struct {
 	appLister *mocks.MockconfigLister
-	prompt    *mocks.Mockprompter
+	prompt    *mocks.MockPrompter
 }
 
 func TestSelect_Application(t *testing.T) {
@@ -2332,7 +2480,7 @@ func TestSelect_Application(t *testing.T) {
 			defer ctrl.Finish()
 
 			mockappLister := mocks.NewMockconfigLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := applicationMocks{
 				appLister: mockappLister,
 				prompt:    mockprompt,
@@ -2354,268 +2502,8 @@ func TestSelect_Application(t *testing.T) {
 	}
 }
 
-func TestOther_Dockerfile(t *testing.T) {
-	dockerfiles := []string{
-		"./Dockerfile",
-		"backend/Dockerfile",
-		"frontend/Dockerfile",
-	}
-	dockerfileOptions := []string{
-		"./Dockerfile",
-		"backend/Dockerfile",
-		"frontend/Dockerfile",
-		"Enter custom path for your Dockerfile",
-		"Use an existing image instead",
-	}
-	testCases := map[string]struct {
-		mockWs     func(retriever *mocks.MockworkspaceRetriever)
-		mockPrompt func(*mocks.Mockprompter)
-
-		wantedErr        error
-		wantedDockerfile string
-	}{
-		"choose an existing Dockerfile": {
-			mockWs: func(m *mocks.MockworkspaceRetriever) {
-				m.EXPECT().ListDockerfiles().Return(dockerfiles, nil)
-			},
-			mockPrompt: func(m *mocks.Mockprompter) {
-				m.EXPECT().SelectOne(
-					gomock.Any(), gomock.Any(),
-					gomock.Eq(dockerfileOptions),
-					gomock.Any(),
-				).Return("frontend/Dockerfile", nil)
-			},
-			wantedErr:        nil,
-			wantedDockerfile: "frontend/Dockerfile",
-		},
-		"prompts user for custom path": {
-			mockWs: func(m *mocks.MockworkspaceRetriever) {
-				m.EXPECT().ListDockerfiles().Return([]string{}, nil)
-			},
-			mockPrompt: func(m *mocks.Mockprompter) {
-				m.EXPECT().SelectOne(
-					gomock.Any(), gomock.Any(),
-					gomock.Eq([]string{
-						"Enter custom path for your Dockerfile",
-						"Use an existing image instead",
-					}),
-					gomock.Any(),
-				).Return("Enter custom path for your Dockerfile", nil)
-				m.EXPECT().Get(
-					gomock.Any(),
-					gomock.Any(),
-					gomock.Any(),
-					gomock.Any(),
-				).Return("crazy/path/Dockerfile", nil)
-			},
-			wantedErr:        nil,
-			wantedDockerfile: "crazy/path/Dockerfile",
-		},
-		"returns an error if fail to list Dockerfile": {
-			mockWs: func(m *mocks.MockworkspaceRetriever) {
-				m.EXPECT().ListDockerfiles().Return(nil, errors.New("some error"))
-			},
-			mockPrompt: func(m *mocks.Mockprompter) {},
-			wantedErr:  fmt.Errorf("list Dockerfiles: some error"),
-		},
-		"returns an error if fail to select Dockerfile": {
-			mockWs: func(m *mocks.MockworkspaceRetriever) {
-				m.EXPECT().ListDockerfiles().Return(dockerfiles, nil)
-			},
-			mockPrompt: func(m *mocks.Mockprompter) {
-				m.EXPECT().SelectOne(
-					gomock.Any(),
-					gomock.Any(),
-					gomock.Any(),
-					gomock.Any(),
-				).Return("", errors.New("some error"))
-			},
-			wantedErr: fmt.Errorf("select Dockerfile: some error"),
-		},
-		"returns an error if fail to get custom Dockerfile path": {
-			mockWs: func(m *mocks.MockworkspaceRetriever) {
-				m.EXPECT().ListDockerfiles().Return(dockerfiles, nil)
-			},
-			mockPrompt: func(m *mocks.Mockprompter) {
-				m.EXPECT().SelectOne(
-					gomock.Any(), gomock.Any(),
-					gomock.Eq(dockerfileOptions),
-					gomock.Any(),
-				).Return("Enter custom path for your Dockerfile", nil)
-				m.EXPECT().Get(
-					gomock.Any(),
-					gomock.Any(),
-					gomock.Any(),
-					gomock.Any(),
-				).Return("", errors.New("some error"))
-			},
-			wantedErr: fmt.Errorf("get custom Dockerfile path: some error"),
-		},
-	}
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			// GIVEN
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			p := mocks.NewMockprompter(ctrl)
-			cfg := mocks.NewMockworkspaceRetriever(ctrl)
-			tc.mockPrompt(p)
-			tc.mockWs(cfg)
-
-			sel := WorkspaceSelector{
-				prompt: p,
-				ws:     cfg,
-			}
-
-			mockPromptText := "prompt"
-			mockHelpText := "help"
-
-			// WHEN
-			dockerfile, err := sel.Dockerfile(
-				mockPromptText,
-				mockPromptText,
-				mockHelpText,
-				mockHelpText,
-				func(v interface{}) error { return nil },
-			)
-
-			// THEN
-			if tc.wantedErr != nil {
-				require.EqualError(t, err, tc.wantedErr.Error())
-			} else {
-				require.Equal(t, tc.wantedDockerfile, dockerfile)
-			}
-		})
-	}
-}
-
-func TestWorkspaceSelect_Schedule(t *testing.T) {
-	scheduleTypePrompt := "HAY WHAT SCHEDULE"
-	scheduleTypeHelp := "NO"
-
-	testCases := map[string]struct {
-		mockWs         func(retriever *mocks.MockworkspaceRetriever)
-		mockPrompt     func(*mocks.Mockprompter)
-		wantedSchedule string
-		wantedErr      error
-	}{
-		"error asking schedule type": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return("", errors.New("some error")),
-				)
-			},
-			wantedErr: errors.New("get schedule type: some error"),
-		},
-		"ask for rate": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return(rate, nil),
-					m.EXPECT().Get(ratePrompt, rateHelp, gomock.Any(), gomock.Any()).Return("1h30m", nil),
-				)
-			},
-			wantedSchedule: "@every 1h30m",
-		},
-		"error getting rate": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return(rate, nil),
-					m.EXPECT().Get(ratePrompt, rateHelp, gomock.Any(), gomock.Any()).Return("", fmt.Errorf("some error")),
-				)
-			},
-			wantedErr: errors.New("get schedule rate: some error"),
-		},
-		"ask for cron": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return(fixedSchedule, nil),
-					m.EXPECT().SelectOption(schedulePrompt, scheduleHelp, presetSchedules, gomock.Any()).Return("Daily", nil),
-				)
-			},
-			wantedSchedule: "@daily",
-		},
-		"error getting cron": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return(fixedSchedule, nil),
-					m.EXPECT().SelectOption(schedulePrompt, scheduleHelp, presetSchedules, gomock.Any()).Return("", errors.New("some error")),
-				)
-			},
-			wantedErr: errors.New("get preset schedule: some error"),
-		},
-		"ask for custom schedule": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return(fixedSchedule, nil),
-					m.EXPECT().SelectOption(schedulePrompt, scheduleHelp, presetSchedules, gomock.Any()).Return("Custom", nil),
-					m.EXPECT().Get(customSchedulePrompt, customScheduleHelp, gomock.Any(), gomock.Any()).Return("0 * * * *", nil),
-					m.EXPECT().Confirm(humanReadableCronConfirmPrompt, humanReadableCronConfirmHelp).Return(true, nil),
-				)
-			},
-			wantedSchedule: "0 * * * *",
-		},
-		"error getting custom schedule": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return(fixedSchedule, nil),
-					m.EXPECT().SelectOption(schedulePrompt, scheduleHelp, presetSchedules, gomock.Any()).Return("Custom", nil),
-					m.EXPECT().Get(customSchedulePrompt, customScheduleHelp, gomock.Any(), gomock.Any()).Return("", errors.New("some error")),
-				)
-			},
-			wantedErr: errors.New("get custom schedule: some error"),
-		},
-		"error confirming custom schedule": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return(fixedSchedule, nil),
-					m.EXPECT().SelectOption(schedulePrompt, scheduleHelp, presetSchedules, gomock.Any()).Return("Custom", nil),
-					m.EXPECT().Get(customSchedulePrompt, customScheduleHelp, gomock.Any(), gomock.Any()).Return("0 * * * *", nil),
-					m.EXPECT().Confirm(humanReadableCronConfirmPrompt, humanReadableCronConfirmHelp).Return(false, errors.New("some error")),
-				)
-			},
-			wantedErr: errors.New("confirm cron schedule: some error"),
-		},
-		"custom schedule using valid definition string results in no confirm": {
-			mockPrompt: func(m *mocks.Mockprompter) {
-				gomock.InOrder(
-					m.EXPECT().SelectOne(scheduleTypePrompt, scheduleTypeHelp, scheduleTypes, gomock.Any()).Return(fixedSchedule, nil),
-					m.EXPECT().SelectOption(schedulePrompt, scheduleHelp, presetSchedules, gomock.Any()).Return("Custom", nil),
-					m.EXPECT().Get(customSchedulePrompt, customScheduleHelp, gomock.Any(), gomock.Any()).Return("@hourly", nil),
-				)
-			},
-			wantedSchedule: "@hourly",
-		},
-	}
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			// GIVEN
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			p := mocks.NewMockprompter(ctrl)
-			cfg := mocks.NewMockworkspaceRetriever(ctrl)
-			tc.mockPrompt(p)
-			sel := WorkspaceSelector{
-				prompt: p,
-				ws:     cfg,
-			}
-
-			var mockValidator prompt.ValidatorFunc = func(interface{}) error { return nil }
-
-			// WHEN
-			schedule, err := sel.Schedule(scheduleTypePrompt, scheduleTypeHelp, mockValidator, mockValidator)
-
-			// THEN
-			if tc.wantedErr != nil {
-				require.EqualError(t, err, tc.wantedErr.Error())
-			} else {
-				require.Equal(t, tc.wantedSchedule, schedule)
-			}
-		})
-	}
-}
-
 type wsPipelineSelectMocks struct {
-	prompt *mocks.Mockprompter
+	prompt *mocks.MockPrompter
 	ws     *mocks.MockwsPipelinesLister
 }
 
@@ -2695,7 +2583,7 @@ func TestWorkspaceSelect_WsPipeline(t *testing.T) {
 			defer ctrl.Finish()
 
 			mockwsPipelinesLister := mocks.NewMockwsPipelinesLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := wsPipelineSelectMocks{
 				prompt: mockprompt,
 				ws:     mockwsPipelinesLister,
@@ -2717,7 +2605,7 @@ func TestWorkspaceSelect_WsPipeline(t *testing.T) {
 }
 
 type codePipelineSelectMocks struct {
-	prompt *mocks.Mockprompter
+	prompt *mocks.MockPrompter
 	cp     *mocks.MockcodePipelineLister
 }
 
@@ -2784,7 +2672,7 @@ func TestCodePipelineSelect_DeployedPipeline(t *testing.T) {
 			defer ctrl.Finish()
 
 			mockCodePipelinesLister := mocks.NewMockcodePipelineLister(ctrl)
-			mockPrompt := mocks.NewMockprompter(ctrl)
+			mockPrompt := mocks.NewMockPrompter(ctrl)
 			mocks := codePipelineSelectMocks{
 				prompt: mockPrompt,
 				cp:     mockCodePipelinesLister,
@@ -2815,7 +2703,7 @@ func TestSelect_CFTask(t *testing.T) {
 		inOpts           []GetDeployedTaskOpts
 
 		mockStore  func(*mocks.MockconfigLister)
-		mockPrompt func(*mocks.Mockprompter)
+		mockPrompt func(*mocks.MockPrompter)
 		mockCF     func(*mocks.MocktaskStackDescriber)
 
 		wantedErr  error
@@ -2840,7 +2728,7 @@ func TestSelect_CFTask(t *testing.T) {
 					},
 				}, nil)
 			},
-			mockPrompt: func(m *mocks.Mockprompter) {
+			mockPrompt: func(m *mocks.MockPrompter) {
 				m.EXPECT().SelectOne(
 					gomock.Any(), gomock.Any(),
 					[]string{
@@ -2861,7 +2749,7 @@ func TestSelect_CFTask(t *testing.T) {
 			mockCF: func(m *mocks.MocktaskStackDescriber) {
 				m.EXPECT().ListTaskStacks("phonetool", "prod-iad").Return(nil, errors.New("some error"))
 			},
-			mockPrompt: func(m *mocks.Mockprompter) {},
+			mockPrompt: func(m *mocks.MockPrompter) {},
 			wantedErr:  errors.New("get tasks in environment prod-iad: some error"),
 		},
 		"with default cluster task": {
@@ -2879,7 +2767,7 @@ func TestSelect_CFTask(t *testing.T) {
 					},
 				}, nil)
 			},
-			mockPrompt: func(m *mocks.Mockprompter) {
+			mockPrompt: func(m *mocks.MockPrompter) {
 				m.EXPECT().SelectOne(
 					gomock.Any(), gomock.Any(),
 					[]string{
@@ -2900,7 +2788,7 @@ func TestSelect_CFTask(t *testing.T) {
 			mockCF: func(m *mocks.MocktaskStackDescriber) {
 				m.EXPECT().ListDefaultTaskStacks().Return(nil, errors.New("some error"))
 			},
-			mockPrompt: func(m *mocks.Mockprompter) {},
+			mockPrompt: func(m *mocks.MockPrompter) {},
 			wantedErr:  errors.New("get tasks in default cluster: some error"),
 		},
 	}
@@ -2909,7 +2797,7 @@ func TestSelect_CFTask(t *testing.T) {
 			// GIVEN
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
-			p := mocks.NewMockprompter(ctrl)
+			p := mocks.NewMockPrompter(ctrl)
 			s := mocks.NewMockconfigLister(ctrl)
 			cf := mocks.NewMocktaskStackDescriber(ctrl)
 			tc.mockPrompt(p)
@@ -2939,7 +2827,7 @@ func TestSelect_CFTask(t *testing.T) {
 
 type taskSelectMocks struct {
 	taskLister *mocks.MocktaskLister
-	prompt     *mocks.Mockprompter
+	prompt     *mocks.MockPrompter
 }
 
 func TestTaskSelect_Task(t *testing.T) {
@@ -3060,7 +2948,7 @@ func TestTaskSelect_Task(t *testing.T) {
 			defer ctrl.Finish()
 
 			mocktaskLister := mocks.NewMocktaskLister(ctrl)
-			mockprompt := mocks.NewMockprompter(ctrl)
+			mockprompt := mocks.NewMockPrompter(ctrl)
 			mocks := taskSelectMocks{
 				taskLister: mocktaskLister,
 				prompt:     mockprompt,

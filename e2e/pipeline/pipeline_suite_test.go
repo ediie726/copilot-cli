@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/aws/copilot-cli/e2e/internal/client"
@@ -52,7 +52,7 @@ var _ = BeforeSuite(func() {
 
 var _ = AfterSuite(func() {
 	_, err := copilot.AppDelete()
-	Expect(err).NotTo(HaveOccurred())
 	_ = aws.DeleteCodeCommitRepo(appName)
 	_ = aws.DeleteCodeCommitIAMUser(codeCommitIAMUser, codeCommitCreds.CredentialID)
+	Expect(err).NotTo(HaveOccurred())
 })

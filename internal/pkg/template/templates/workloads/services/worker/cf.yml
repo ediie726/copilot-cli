@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a worker service on Amazon ECS.
-{{- if .SerializedManifest }}
 Metadata:
+  Version: {{ .Version }}
+{{- if .SerializedManifest }}
   Manifest: |
 {{indent 4 .SerializedManifest}}
 {{- end }}
@@ -30,14 +31,36 @@ Parameters:
     Description: 'URL of the environment file.'
     Type: String
     Default: ""
+{{- if .LogConfig}}
+  LoggingEnvFileARN:
+    Type: String
+    Description: 'URL of the environment file for the logging sidecar.'
+    Default: ""
+{{- end}}
+{{- range $sidecar := .Sidecars }}
+  EnvFileARNFor{{ logicalIDSafe $sidecar.Name}}:
+    Type: String
+    Description: 'URL of the environment file for the {{$sidecar.Name}} sidecar.'
+    Default: ""
+{{- end }}
   LogRetention:
     Type: Number
     Default: 30
 Conditions:
+  IsGovCloud:
+    !Equals [!Ref "AWS::Partition", "aws-us-gov"]
   HasAddons:
     !Not [!Equals [!Ref AddonsTemplateURL, ""]]
   HasEnvFile:
     !Not [!Equals [!Ref EnvFileARN, ""]]
+{{- if .LogConfig}}
+  HasLoggingEnvFile:
+    !Not [!Equals [!Ref LoggingEnvFileARN, ""]]
+{{- end}}
+{{- range $sidecar := .Sidecars }}
+  HasEnvFileFor{{ logicalIDSafe $sidecar.Name}}:
+    !Not [!Equals [!Ref EnvFileARNFor{{ logicalIDSafe $sidecar.Name}}, ""]]
+{{- end }}
 Resources:
 {{include "loggroup" . | indent 2}}
 
@@ -59,6 +82,8 @@ Resources:
 {{- if .Autoscaling }}
 {{include "autoscaling" . | indent 2}}
 {{- end}}
+{{include "rollback-alarms" . | indent 2}}
+
   Service:
     DependsOn:
     - EnvControllerAction

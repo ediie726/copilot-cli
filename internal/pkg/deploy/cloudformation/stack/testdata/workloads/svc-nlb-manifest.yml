@@ -26,11 +26,20 @@ environments:
     nlb:
       healthcheck:
         port: 80
+      additional_listeners:
+        - port: 8081/tcp
+    network:
+      connect: true
   dev:
     http:
       path: '/'
+      deregistration_delay: 30s
     nlb:
       port: 81/tcp
+      additional_listeners:
+        - port: 8082/tcp
+          target_port: 8085
+          deregistration_delay: 59s
     count:
       spot: 5
   prod:
@@ -39,9 +48,19 @@ environments:
       port: 443/tls
       target_container: tls
       alias: nlb.example.com
+      additional_listeners:
+        - port: 8081/TLS
+        - port: 8082/tcp
+          target_port: 8085
+          target_container: tls
+        - port: 8083/TCP
+          target_port: 85
     count: 5
     sidecars:
       tls:
         port: 82
+        image: 1234567890.dkr.ecr.us-west-2.amazonaws.com/proxy:${TAG}
+      nginx:
+        port: 85
         image: 1234567890.dkr.ecr.us-west-2.amazonaws.com/proxy:${TAG}
 

@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/copilot-cli/internal/pkg/aws/cloudformation/stackset"
+	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 
 	"github.com/aws/aws-sdk-go/aws"
 	sdkcloudformation "github.com/aws/aws-sdk-go/service/cloudformation"
@@ -22,6 +24,43 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 )
+
+type mockOverrider struct {
+	out []byte
+	err error
+}
+
+func (m *mockOverrider) Override(_ []byte) ([]byte, error) {
+	return m.out, m.err
+}
+
+func TestWrapWithTemplateOverrider(t *testing.T) {
+	t.Run("should return the overriden Template", func(t *testing.T) {
+		// GIVEN
+		var stack StackConfiguration = &mockStackConfig{template: "hello"}
+		ovrdr := &mockOverrider{out: []byte("bye")}
+
+		// WHEN
+		stack = WrapWithTemplateOverrider(stack, ovrdr)
+		tpl, err := stack.Template()
+
+		// THEN
+		require.NoError(t, err)
+		require.Equal(t, "bye", tpl)
+	})
+	t.Run("should return a wrapped error when Override call fails", func(t *testing.T) {
+		// GIVEN
+		var stack StackConfiguration = &mockStackConfig{template: "hello"}
+		ovrdr := &mockOverrider{err: errors.New("some error")}
+
+		// WHEN
+		stack = WrapWithTemplateOverrider(stack, ovrdr)
+		_, err := stack.Template()
+
+		// THEN
+		require.EqualError(t, err, "override template: some error")
+	})
+}
 
 func TestIsEmptyErr(t *testing.T) {
 	testCases := map[string]struct {
@@ -66,6 +105,10 @@ func testDeployWorkload_OnPushToS3Failure(t *testing.T, when func(cf CloudFormat
 	client := CloudFormation{
 		s3Client: mS3Client,
 		console:  mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
 	}
 
 	// WHEN
@@ -86,7 +129,12 @@ func testDeployWorkload_OnCreateChangeSetFailure(t *testing.T, when func(cf Clou
 	m.EXPECT().Create(gomock.Any()).Return("", wantedErr)
 	m.EXPECT().ErrorEvents(gomock.Any()).Return(nil, nil)
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
+	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 
 	// WHEN
 	err := when(client)
@@ -107,7 +155,12 @@ func testDeployWorkload_OnUpdateChangeSetFailure(t *testing.T, when func(cf Clou
 	m.EXPECT().Update(gomock.Any()).Return("", wantedErr)
 	m.EXPECT().ErrorEvents(gomock.Any()).Return(nil, nil)
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
+	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 
 	// WHEN
 	err := when(client)
@@ -126,8 +179,12 @@ func testDeployWorkload_OnDescribeChangeSetFailure(t *testing.T, when func(cf Cl
 	m.EXPECT().Create(gomock.Any()).Return("1234", nil)
 	m.EXPECT().DescribeChangeSet(gomock.Any(), gomock.Any()).Return(nil, errors.New("DescribeChangeSet error"))
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
-
+	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 	// WHEN
 	err := when(client)
 
@@ -146,7 +203,12 @@ func testDeployWorkload_OnTemplateBodyFailure(t *testing.T, when func(cf CloudFo
 	m.EXPECT().DescribeChangeSet(gomock.Any(), gomock.Any()).Return(&cloudformation.ChangeSetDescription{}, nil)
 	m.EXPECT().TemplateBodyFromChangeSet(gomock.Any(), gomock.Any()).Return("", errors.New("TemplateBody error"))
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
+	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 
 	// WHEN
 	err := when(client)
@@ -168,8 +230,12 @@ func testDeployWorkload_StackStreamerFailureShouldCancelRenderer(t *testing.T, w
 	m.EXPECT().TemplateBodyFromChangeSet(gomock.Any(), gomock.Any()).Return("", nil)
 	m.EXPECT().DescribeStackEvents(gomock.Any()).Return(nil, wantedErr)
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
-
+	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 	// WHEN
 	err := when(client)
 
@@ -201,8 +267,23 @@ func testDeployWorkload_StreamUntilStackCreationFails(t *testing.T, stackName st
 	m.EXPECT().Describe(stackName).Return(&cloudformation.StackDescription{
 		StackStatus: aws.String("CREATE_FAILED"),
 	}, nil)
+	m.EXPECT().ErrorEvents(stackName).Return(
+		[]cloudformation.StackEvent{
+			{
+				EventId:            aws.String("2"),
+				LogicalResourceId:  aws.String(stackName),
+				PhysicalResourceId: aws.String("AWS::AppRunner::Service"),
+				ResourceStatus:     aws.String("CREATE_FAILED"), // Send failure event for stack.
+				Timestamp:          aws.Time(time.Now()),
+			},
+		}, nil)
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
+	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 
 	// WHEN
 	err := when(client)
@@ -282,7 +363,12 @@ Resources:
 		StackStatus: aws.String("CREATE_COMPLETE"),
 	}, nil)
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: mockCFN, ecsClient: mockECS, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
+	client := CloudFormation{cfnClient: mockCFN, ecsClient: mockECS, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 
 	// WHEN
 	err := when(client)
@@ -362,7 +448,12 @@ Resources:
 		StackStatus: aws.String("CREATE_COMPLETE"),
 	}, nil)
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: mockCFN, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
+	client := CloudFormation{cfnClient: mockCFN, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 
 	// WHEN
 	err := when(client)
@@ -483,7 +574,12 @@ Resources:
 		},
 	}, nil).AnyTimes()
 	buf := new(strings.Builder)
-	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf}}
+	client := CloudFormation{cfnClient: m, s3Client: mS3Client, console: mockFileWriter{Writer: buf},
+		notifySignals: func() chan os.Signal {
+			sigCh := make(chan os.Signal, 1)
+			return sigCh
+		},
+	}
 
 	// WHEN
 	err := when(client)
@@ -628,6 +724,16 @@ func testDeployTask_StreamUntilStackCreationFails(t *testing.T, stackName string
 	m.EXPECT().Describe(stackName).Return(&cloudformation.StackDescription{
 		StackStatus: aws.String("CREATE_FAILED"),
 	}, nil)
+	m.EXPECT().ErrorEvents(stackName).Return(
+		[]cloudformation.StackEvent{
+			{
+				EventId:            aws.String("2"),
+				LogicalResourceId:  aws.String(stackName),
+				PhysicalResourceId: aws.String("AWS::AppRunner::Service"),
+				ResourceStatus:     aws.String("CREATE_FAILED"), // Send failure event for stack.
+				Timestamp:          aws.Time(time.Now()),
+			},
+		}, nil)
 	buf := new(strings.Builder)
 	client := CloudFormation{cfnClient: m, console: mockFileWriter{Writer: buf}}
 
@@ -757,4 +863,50 @@ Resources:
 	require.Contains(t, buf.String(), "An ECS cluster")
 	require.Contains(t, buf.String(), "An Addons CloudFormation Stack for your additional AWS resources")
 	require.Contains(t, buf.String(), "A DynamoDB table to store data")
+}
+
+func TestCloudFormation_Template(t *testing.T) {
+	inStackName := stack.NameForEnv("phonetool", "test")
+	testCases := map[string]struct {
+		inClient       func(ctrl *gomock.Controller) *mocks.MockcfnClient
+		wantedTemplate string
+		wantedError    error
+	}{
+		"error getting the template body": {
+			inClient: func(ctrl *gomock.Controller) *mocks.MockcfnClient {
+				m := mocks.NewMockcfnClient(ctrl)
+				m.EXPECT().TemplateBody("phonetool-test").Return("", errors.New("some error"))
+				return m
+			},
+			wantedError: errors.New("some error"),
+		},
+		"returns the template body": {
+			inClient: func(ctrl *gomock.Controller) *mocks.MockcfnClient {
+				m := mocks.NewMockcfnClient(ctrl)
+				m.EXPECT().TemplateBody("phonetool-test").Return("mockTemplate", nil)
+				return m
+			},
+			wantedTemplate: "mockTemplate",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			// GIVEN
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			cf := &CloudFormation{
+				cfnClient: tc.inClient(ctrl),
+			}
+
+			// WHEN
+			got, gotErr := cf.Template(inStackName)
+			if tc.wantedError != nil {
+				require.EqualError(t, gotErr, tc.wantedError.Error())
+			} else {
+				require.NoError(t, gotErr)
+				require.Equal(t, tc.wantedTemplate, got)
+			}
+		})
+	}
 }

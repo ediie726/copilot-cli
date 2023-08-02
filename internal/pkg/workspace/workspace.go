@@ -4,21 +4,22 @@
 // Package workspace contains functionality to manage a user's local workspace. This includes
 // creating an application directory, reading and writing a summary file to associate the workspace with the application,
 // and managing infrastructure-as-code files. The typical workspace will be structured like:
-//  .
-//  ├── copilot                        (application directory)
-//  │   ├── .workspace                 (workspace summary)
-//  │   ├── my-service
-//  │   │   └── manifest.yml           (service manifest)
-//  |   |   environments
-//  |   |   └── test
-//  │   │       └── manifest.yml       (environment manifest for the environment test)
-//  │   ├── buildspec.yml              (legacy buildspec for the pipeline's build stage)
-//  │   ├── pipeline.yml               (legacy pipeline manifest)
-//  │   ├── pipelines
-//  │   │   ├── pipeline-app-beta
-//  │   │   │   ├── buildspec.yml      (buildspec for the pipeline 'pipeline-app-beta')
-//  │   ┴   ┴   └── manifest.yml       (pipeline manifest for the pipeline 'pipeline-app-beta')
-//  └── my-service-src                 (customer service code)
+//
+//	.
+//	├── copilot                        (application directory)
+//	│   ├── .workspace                 (workspace summary)
+//	│   ├── my-service
+//	│   │   └── manifest.yml           (service manifest)
+//	|   |   environments
+//	|   |   └── test
+//	│   │       └── manifest.yml       (environment manifest for the environment test)
+//	│   ├── buildspec.yml              (legacy buildspec for the pipeline's build stage)
+//	│   ├── pipeline.yml               (legacy pipeline manifest)
+//	│   ├── pipelines
+//	│   │   ├── pipeline-app-beta
+//	│   │   │   ├── buildspec.yml      (buildspec for the pipeline 'pipeline-app-beta')
+//	│   ┴   ┴   └── manifest.yml       (pipeline manifest for the pipeline 'pipeline-app-beta')
+//	└── my-service-src                 (customer service code)
 package workspace
 
 import (
@@ -28,8 +29,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
+	"sync"
 
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
 
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
@@ -42,112 +44,199 @@ const (
 	CopilotDirName = "copilot"
 	// SummaryFileName is the name of the file that is associated with the application.
 	SummaryFileName = ".workspace"
+	// AddonsParametersFileName is the name of the file that define extra parameters for an addon.
+	AddonsParametersFileName = "addons.parameters.yml"
 
 	addonsDirName             = "addons"
+	overridesDirName          = "overrides"
 	pipelinesDirName          = "pipelines"
 	environmentsDirName       = "environments"
 	maximumParentDirsToSearch = 5
 	legacyPipelineFileName    = "pipeline.yml"
 	manifestFileName          = "manifest.yml"
 	buildspecFileName         = "buildspec.yml"
-
-	ymlFileExtension = ".yml"
-
-	dockerfileName   = "dockerfile"
-	dockerignoreName = ".dockerignore"
 )
+
+// ErrTraverseUpShouldStop signals that TraverseUp should stop.
+var ErrTraverseUpShouldStop = errors.New("should stop")
+
+// TraverseUpProcessFn represents a function that TraverseUp invokes at each level of traversal.
+// If TraverseUpProcessFn returns an ErrTraverseUpShouldStop, TraverseUp will stop traversing, return the result and a nil error.
+// If TraverseUpProcessFn returns some other error, TraverseUp will stop traversing, return an empty string and the error.
+// If TraverseUpProcessFn returns a nil error, TraverseUp will keep traversing up the directory tree.
+type TraverseUpProcessFn func(dir string) (result string, err error)
+
+// TraverseUp traverses at most `maxLevels` up from the starting directory, invoke TraverseUpProcessFn at each level,
+// and returns the value that it gets TraverseUpProcessFn process upon receiving an ErrTraverseUpShouldStop signal.
+// If after traversing up `maxLevels`, it still hasn't received a ErrTraverseUpShouldStop signal, it will return ErrTargetNotFound.
+func TraverseUp(startDir string, maxLevels int, process TraverseUpProcessFn) (string, error) {
+	searchingDir := startDir
+	for try := 0; try < maxLevels; try++ {
+		result, err := process(searchingDir)
+		if errors.Is(err, ErrTraverseUpShouldStop) {
+			return result, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		searchingDir = filepath.Dir(searchingDir)
+	}
+	return "", &ErrTargetNotFound{
+		startDir:              startDir,
+		numberOfLevelsChecked: maxLevels,
+	}
+}
 
 // Summary is a description of what's associated with this workspace.
 type Summary struct {
 	Application string `yaml:"application"` // Name of the application.
-
-	Path string // absolute path to the summary file.
+	Path        string `yaml:"-"`           // Absolute path to the summary file.
 }
 
 // Workspace typically represents a Git repository where the user has its infrastructure-as-code files as well as source files.
 type Workspace struct {
 	workingDirAbs string
-	copilotDirAbs string
-	fs            *afero.Afero
-	logger        func(format string, args ...interface{})
+	CopilotDirAbs string // TODO: make private by adding mocks for selector unit testing.
+
+	// These fields should be accessed via the Summary method and not directly.
+	summary       *Summary
+	summaryErr    error
+	summarizeOnce sync.Once
+
+	fs     *afero.Afero
+	logger func(format string, args ...interface{})
 }
 
-// New returns a workspace, used for reading and writing to user's local workspace.
-func New() (*Workspace, error) {
-	fs := afero.NewOsFs()
-	fsUtils := &afero.Afero{Fs: fs}
-	logger := log.Infof
+var getWd = os.Getwd
 
-	workingDirAbs, err := os.Getwd()
+// Use returns an existing workspace, searching for a copilot/ directory from the current wd,
+// up to 5 levels above. It returns ErrWorkspaceNotFound if no copilot/ directory is found.
+func Use(fs afero.Fs) (*Workspace, error) {
+	workingDirAbs, err := getWd()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get working directory: %w", err)
 	}
-
-	ws := Workspace{
+	ws := &Workspace{
 		workingDirAbs: workingDirAbs,
-		fs:            fsUtils,
-		logger:        logger,
+		fs:            &afero.Afero{Fs: fs},
+		logger:        log.Infof,
 	}
-
-	return &ws, nil
-}
-
-// Create creates the copilot directory (if it doesn't already exist) in the current working directory,
-// and saves a summary with the application name.
-func (ws *Workspace) Create(appName string) error {
-	// Create an application directory, if one doesn't exist
-	if err := ws.createCopilotDir(); err != nil {
-		return err
-	}
-
-	// Grab an existing workspace summary, if one exists.
-	summary, err := ws.Summary()
-	if err == nil {
-		// If a summary exists, but is registered to a different application, throw an error.
-		if summary.Application != appName {
-			return &errHasExistingApplication{
-				existingAppName: summary.Application,
-				basePath:        ws.workingDirAbs,
-				summaryPath:     summary.Path,
-			}
-		}
-		// Otherwise our work is all done.
-		return nil
-	}
-
-	// If there isn't an existing workspace summary, create it.
-	var notFound *errNoAssociatedApplication
-	if errors.As(err, &notFound) {
-		return ws.writeSummary(appName)
-	}
-
-	return err
-}
-
-// Summary returns a summary of the workspace - including the application name.
-func (ws *Workspace) Summary() (*Summary, error) {
-	summaryPath, err := ws.summaryPath()
+	copilotDirPath, err := ws.copilotDirPath()
 	if err != nil {
 		return nil, err
 	}
-	summaryFileExists, _ := ws.fs.Exists(summaryPath) // If an err occurs, return no applications.
-	if summaryFileExists {
-		value, err := ws.fs.ReadFile(summaryPath)
-		if err != nil {
+	ws.CopilotDirAbs = copilotDirPath
+	if _, err := ws.Summary(); err != nil {
+		// If there is an issue retrieving the summary, then the workspace is not usable.
+		return nil, err
+	}
+	return ws, nil
+}
+
+// Create creates a new Workspace in the current working directory for appName with summary if it doesn't already exist.
+func Create(appName string, fs afero.Fs) (*Workspace, error) {
+	workingDirAbs, err := getWd()
+	if err != nil {
+		return nil, fmt.Errorf("get working directory: %w", err)
+	}
+	ws := &Workspace{
+		workingDirAbs: workingDirAbs,
+		fs:            &afero.Afero{Fs: fs},
+		logger:        log.Infof,
+	}
+
+	// Check if a workspace already exists.
+	copilotDirPath, err := ws.copilotDirPath()
+	var errWSNotFound *ErrWorkspaceNotFound
+	if err != nil && !errors.As(err, &errWSNotFound) {
+		return nil, err
+	}
+	if err == nil {
+		ws.CopilotDirAbs = copilotDirPath
+		// If so, grab the summary.
+		summary, err := ws.Summary()
+		if err == nil {
+			// If a summary exists, but is registered to a different application, throw an error.
+			if summary.Application != appName {
+				return nil, &errHasExistingApplication{
+					existingAppName: summary.Application,
+					basePath:        ws.workingDirAbs,
+					summaryPath:     summary.Path,
+				}
+			}
+			// Otherwise our work is all done.
+			return ws, nil
+		}
+		var notFound *ErrNoAssociatedApplication
+		if !errors.As(err, &notFound) {
 			return nil, err
 		}
-		wsSummary := Summary{
+	}
+
+	// Create a workspace, including both the dir and workspace file.
+	CopilotDirAbs, err := ws.createCopilotDir()
+	if err != nil {
+		return nil, err
+	}
+	ws.CopilotDirAbs = CopilotDirAbs
+	ws.summary, ws.summaryErr = ws.writeSummary(appName)
+	if ws.summaryErr != nil {
+		return nil, err
+	}
+
+	return ws, nil
+}
+
+// ProjectRoot returns a path to the presumed root of the project, the directory that contains the copilot dir and .workspace file.
+func (ws *Workspace) ProjectRoot() string {
+	return filepath.Dir(ws.CopilotDirAbs)
+}
+
+// Summary returns a summary of the workspace. The method assumes that the workspace exists and the path is known.
+func (ws *Workspace) Summary() (*Summary, error) {
+	ws.summarizeOnce.Do(func() {
+		summaryPath := filepath.Join(ws.CopilotDirAbs, SummaryFileName) // Assume `CopilotDirAbs` is always present.
+		if ok, _ := ws.fs.Exists(summaryPath); !ok {
+			ws.summaryErr = &ErrNoAssociatedApplication{}
+			return
+		}
+		f, err := ws.fs.ReadFile(summaryPath)
+		if err != nil {
+			ws.summaryErr = err
+			return
+		}
+		ws.summary = &Summary{
 			Path: summaryPath,
 		}
-		return &wsSummary, yaml.Unmarshal(value, &wsSummary)
+		ws.summaryErr = yaml.Unmarshal(f, ws.summary)
+	})
+	return ws.summary, ws.summaryErr
+}
+
+// WorkloadExists returns true if a workload exists in the workspace.
+func (ws *Workspace) WorkloadExists(name string) (bool, error) {
+	path := filepath.Join(ws.CopilotDirAbs, name, manifestFileName)
+	exists, err := ws.fs.Exists(path)
+	if err != nil {
+		return false, fmt.Errorf("check if %s exists: %w", path, err)
 	}
-	return nil, &errNoAssociatedApplication{}
+	return exists, nil
+}
+
+// HasEnvironments returns true if the workspace manages environments.
+func (ws *Workspace) HasEnvironments() (bool, error) {
+	path := filepath.Join(ws.CopilotDirAbs, environmentsDirName)
+	exists, err := ws.fs.Exists(path)
+	if err != nil {
+		return false, fmt.Errorf("check if %s exists: %w", path, err)
+	}
+	return exists, nil
 }
 
 // ListServices returns the names of the services in the workspace.
 func (ws *Workspace) ListServices() ([]string, error) {
 	return ws.listWorkloads(func(wlType string) bool {
-		for _, t := range manifest.ServiceTypes() {
+		for _, t := range manifestinfo.ServiceTypes() {
 			if wlType == t {
 				return true
 			}
@@ -159,7 +248,7 @@ func (ws *Workspace) ListServices() ([]string, error) {
 // ListJobs returns the names of all jobs in the workspace.
 func (ws *Workspace) ListJobs() ([]string, error) {
 	return ws.listWorkloads(func(wlType string) bool {
-		for _, t := range manifest.JobTypes() {
+		for _, t := range manifestinfo.JobTypes() {
 			if wlType == t {
 				return true
 			}
@@ -203,17 +292,10 @@ func (ws *Workspace) ListPipelines() ([]PipelineManifest, error) {
 	}
 
 	// add the legacy pipeline
-	legacyPath, err := ws.pipelineManifestLegacyPath()
-	if err != nil {
-		return nil, err
-	}
-	addManifest(legacyPath)
+	addManifest(ws.pipelineManifestLegacyPath())
 
 	// add each file that matches pipelinesDir/*/manifest.yml
-	pipelinesDir, err := ws.pipelinesDirPath()
-	if err != nil {
-		return nil, err
-	}
+	pipelinesDir := ws.pipelinesDirPath()
 
 	exists, err := ws.fs.Exists(pipelinesDir)
 	switch {
@@ -245,20 +327,16 @@ func (ws *Workspace) ListPipelines() ([]PipelineManifest, error) {
 
 // listWorkloads returns the name of all workloads (either services or jobs) in the workspace.
 func (ws *Workspace) listWorkloads(match func(string) bool) ([]string, error) {
-	copilotPath, err := ws.copilotDirPath()
+	files, err := ws.fs.ReadDir(ws.CopilotDirAbs)
 	if err != nil {
-		return nil, err
-	}
-	files, err := ws.fs.ReadDir(copilotPath)
-	if err != nil {
-		return nil, fmt.Errorf("read directory %s: %w", copilotPath, err)
+		return nil, fmt.Errorf("read directory %s: %w", ws.CopilotDirAbs, err)
 	}
 	var names []string
 	for _, f := range files {
 		if !f.IsDir() {
 			continue
 		}
-		if exists, _ := ws.fs.Exists(filepath.Join(copilotPath, f.Name(), manifestFileName)); !exists {
+		if exists, _ := ws.fs.Exists(filepath.Join(ws.CopilotDirAbs, f.Name(), manifestFileName)); !exists {
 			// Swallow the error because we don't want to include any services that we don't have permissions to read.
 			continue
 		}
@@ -279,11 +357,7 @@ func (ws *Workspace) listWorkloads(match func(string) bool) ([]string, error) {
 
 // ListEnvironments returns the name of the environments in the workspace.
 func (ws *Workspace) ListEnvironments() ([]string, error) {
-	copilotPath, err := ws.copilotDirPath()
-	if err != nil {
-		return nil, err
-	}
-	envPath := filepath.Join(copilotPath, environmentsDirName)
+	envPath := filepath.Join(ws.CopilotDirAbs, environmentsDirName)
 	files, err := ws.fs.ReadDir(envPath)
 	if err != nil {
 		return nil, fmt.Errorf("read directory %s: %w", envPath, err)
@@ -293,7 +367,7 @@ func (ws *Workspace) ListEnvironments() ([]string, error) {
 		if !f.IsDir() {
 			continue
 		}
-		if exists, _ := ws.fs.Exists(filepath.Join(copilotPath, environmentsDirName, f.Name(), manifestFileName)); !exists {
+		if exists, _ := ws.fs.Exists(filepath.Join(ws.CopilotDirAbs, environmentsDirName, f.Name(), manifestFileName)); !exists {
 			// Swallow the error because we don't want to include any environments that we don't have permissions to read.
 			continue
 		}
@@ -329,8 +403,8 @@ func (ws *Workspace) ReadEnvironmentManifest(mftDirName string) (EnvironmentMani
 	if err != nil {
 		return nil, err
 	}
-	if typ != manifest.EnvironmentManifestType {
-		return nil, fmt.Errorf(`manifest %s has type of "%s", not "%s"`, mftDirName, typ, manifest.EnvironmentManifestType)
+	if typ != manifest.Environmentmanifestinfo {
+		return nil, fmt.Errorf(`manifest %s has type of "%s", not "%s"`, mftDirName, typ, manifest.Environmentmanifestinfo)
 	}
 	return mft, nil
 }
@@ -406,18 +480,58 @@ func (ws *Workspace) WriteEnvironmentManifest(marshaler encoding.BinaryMarshaler
 // DeleteWorkspaceFile removes the .workspace file under copilot/ directory.
 // This will be called during app delete, we do not want to delete any other generated files.
 func (ws *Workspace) DeleteWorkspaceFile() error {
-	return ws.fs.Remove(filepath.Join(CopilotDirName, SummaryFileName))
+	return ws.fs.Remove(filepath.Join(ws.CopilotDirAbs, SummaryFileName))
 }
 
-// ReadAddonsDir returns a list of file names under a service's "addons/" directory.
-func (ws *Workspace) ReadAddonsDir(svcName string) ([]string, error) {
-	copilotPath, err := ws.copilotDirPath()
-	if err != nil {
-		return nil, err
-	}
+// EnvAddonsAbsPath returns the absolute path for the addons/ directory of environments.
+func (ws *Workspace) EnvAddonsAbsPath() string {
+	return filepath.Join(ws.CopilotDirAbs, environmentsDirName, addonsDirName)
+}
 
+// EnvAddonFileAbsPath returns the absolute path of an addon file for environments.
+func (ws *Workspace) EnvAddonFileAbsPath(fName string) string {
+	return filepath.Join(ws.EnvAddonsAbsPath(), fName)
+}
+
+// WorkloadAddonsAbsPath returns the absolute path for the addons/ directory file path of a given workload.
+func (ws *Workspace) WorkloadAddonsAbsPath(name string) string {
+	return filepath.Join(ws.CopilotDirAbs, name, addonsDirName)
+}
+
+// WorkloadAddonFileAbsPath returns the absolute path of an addon file for a given workload.
+func (ws *Workspace) WorkloadAddonFileAbsPath(wkldName, fName string) string {
+	return filepath.Join(ws.WorkloadAddonsAbsPath(wkldName), fName)
+}
+
+// WorkloadAddonFilePath returns the path under the workspace of an addon file for a given workload.
+func (ws *Workspace) WorkloadAddonFilePath(wkldName, fName string) string {
+	return filepath.Join(wkldName, addonsDirName, fName)
+}
+
+// EnvAddonFilePath returns the path under the workspace of an addon file for environments.
+func (ws *Workspace) EnvAddonFilePath(fName string) string {
+	return filepath.Join(environmentsDirName, addonsDirName, fName)
+}
+
+// EnvOverridesPath returns the default path to the overrides/ directory for environments.
+func (ws *Workspace) EnvOverridesPath() string {
+	return filepath.Join(ws.CopilotDirAbs, environmentsDirName, overridesDirName)
+}
+
+// WorkloadOverridesPath returns the default path to the overrides/ directory for a given workload.
+func (ws *Workspace) WorkloadOverridesPath(name string) string {
+	return filepath.Join(ws.CopilotDirAbs, name, overridesDirName)
+}
+
+// PipelineOverridesPath returns the default path to the overrides/ directory for a given pipeline.
+func (ws *Workspace) PipelineOverridesPath(name string) string {
+	return filepath.Join(ws.CopilotDirAbs, pipelinesDirName, name, overridesDirName)
+}
+
+// ListFiles returns a list of file paths to all the files under the dir.
+func (ws *Workspace) ListFiles(dirPath string) ([]string, error) {
 	var names []string
-	files, err := ws.fs.ReadDir(filepath.Join(copilotPath, svcName, addonsDirName))
+	files, err := ws.fs.ReadDir(dirPath)
 	if err != nil {
 		return nil, err
 	}
@@ -427,20 +541,27 @@ func (ws *Workspace) ReadAddonsDir(svcName string) ([]string, error) {
 	return names, nil
 }
 
-// ReadAddon returns the contents of a file under the service's "addons/" directory.
-func (ws *Workspace) ReadAddon(svc, fname string) ([]byte, error) {
-	return ws.read(svc, addonsDirName, fname)
+// ReadFile returns the content of a file.
+// Returns ErrFileNotExists if the file does not exist.
+func (ws *Workspace) ReadFile(fPath string) ([]byte, error) {
+	exist, err := ws.fs.Exists(fPath)
+	if err != nil {
+		return nil, fmt.Errorf("check if file %s exists: %w", fPath, err)
+	}
+	if !exist {
+		return nil, &ErrFileNotExists{FileName: fPath}
+	}
+	return ws.fs.ReadFile(fPath)
 }
 
-// WriteAddon writes the content of an addon file under "{svc}/addons/{name}.yml".
+// Write writes the content under the path relative to "copilot/" directory.
 // If successful returns the full path of the file, otherwise an empty string and an error.
-func (ws *Workspace) WriteAddon(content encoding.BinaryMarshaler, svc, name string) (string, error) {
+func (ws *Workspace) Write(content encoding.BinaryMarshaler, path string) (string, error) {
 	data, err := content.MarshalBinary()
 	if err != nil {
-		return "", fmt.Errorf("marshal binary addon content: %w", err)
+		return "", fmt.Errorf("marshal binary content: %w", err)
 	}
-	fname := name + ymlFileExtension
-	return ws.write(data, svc, addonsDirName, fname)
+	return ws.write(data, path)
 }
 
 // FileStat wraps the os.Stat function.
@@ -455,94 +576,67 @@ func IsInGitRepository(fs FileStat) bool {
 }
 
 // pipelineManifestLegacyPath returns the path to pipeline manifests before multiple pipelines (and the copilot/pipelines/ dir) were enabled.
-func (ws *Workspace) pipelineManifestLegacyPath() (string, error) {
-	copilotPath, err := ws.copilotDirPath()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(copilotPath, legacyPipelineFileName), nil
+func (ws *Workspace) pipelineManifestLegacyPath() string {
+	return filepath.Join(ws.CopilotDirAbs, legacyPipelineFileName)
 }
 
-func (ws *Workspace) writeSummary(appName string) error {
-	summaryPath, err := ws.summaryPath()
-	if err != nil {
-		return err
-	}
-
-	workspaceSummary := Summary{
+func (ws *Workspace) writeSummary(appName string) (*Summary, error) {
+	summaryPath := ws.summaryPath()
+	summary := Summary{
 		Application: appName,
+		Path:        summaryPath,
 	}
 
-	serializedWorkspaceSummary, err := yaml.Marshal(workspaceSummary)
-
+	serializedWorkspaceSummary, err := yaml.Marshal(summary)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return ws.fs.WriteFile(summaryPath, serializedWorkspaceSummary, 0644)
+	return &summary, ws.fs.WriteFile(summaryPath, serializedWorkspaceSummary, 0644)
 }
 
-func (ws *Workspace) pipelinesDirPath() (string, error) {
-	copilotPath, err := ws.copilotDirPath()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(copilotPath, pipelinesDirName), nil
+func (ws *Workspace) pipelinesDirPath() string {
+	return filepath.Join(ws.CopilotDirAbs, pipelinesDirName)
 }
 
-func (ws *Workspace) summaryPath() (string, error) {
-	copilotPath, err := ws.copilotDirPath()
-	if err != nil {
-		return "", err
-	}
-	workspaceSummaryPath := filepath.Join(copilotPath, SummaryFileName)
-	return workspaceSummaryPath, nil
+func (ws *Workspace) summaryPath() string {
+	return filepath.Join(ws.CopilotDirAbs, SummaryFileName)
 }
 
-func (ws *Workspace) createCopilotDir() error {
+func (ws *Workspace) createCopilotDir() (string, error) {
 	// First check to see if a manifest directory already exists
 	existingWorkspace, _ := ws.copilotDirPath()
 	if existingWorkspace != "" {
-		return nil
+		return existingWorkspace, nil
 	}
-	return ws.fs.Mkdir(CopilotDirName, 0755)
+	if err := ws.fs.Mkdir(CopilotDirName, 0755); err != nil {
+		return "", err
+	}
+	return filepath.Join(ws.workingDirAbs, CopilotDirName), nil
 }
 
 // Path returns the absolute path to the workspace.
-func (ws *Workspace) Path() (string, error) {
-	copilotDirPath, err := ws.copilotDirPath()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Dir(copilotDirPath), nil
+func (ws *Workspace) Path() string {
+	return filepath.Dir(ws.CopilotDirAbs)
 }
 
+// Rel returns the relative path to path from the workspace copilot directory.
 func (ws *Workspace) Rel(path string) (string, error) {
-	copiDir, err := ws.copilotDirPath()
-	if err != nil {
-		return "", fmt.Errorf("get path to Copilot dir: %w", err)
-	}
 	fullPath, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("make path absolute: %w", err)
 	}
-	return filepath.Rel(filepath.Dir(copiDir), fullPath)
+	return filepath.Rel(filepath.Dir(ws.CopilotDirAbs), fullPath)
 }
 
 // copilotDirPath tries to find the current app's copilot directory from the workspace working directory.
 func (ws *Workspace) copilotDirPath() (string, error) {
-	if ws.copilotDirAbs != "" {
-		return ws.copilotDirAbs, nil
-	}
-
 	// Are we in the application's copilot directory already?
 	//
 	// Note: This code checks for *any* directory named "copilot", but this might not work
 	// correctly if we're in some subdirectory of the app that the user might have happened
-	// to name "copilot". It's not clear if there's a good way to avoid that problem, though it
-	// doesn't seem to be a terribly likely issue.
+	// to name "copilot". Our docs warn users and suggest creating another "copilot" dir closer to the wd.
 	if filepath.Base(ws.workingDirAbs) == CopilotDirName {
-		ws.copilotDirAbs = ws.workingDirAbs
-		return ws.copilotDirAbs, nil
+		return ws.workingDirAbs, nil
 	}
 
 	// We might be in the application directory or in a subdirectory of the application
@@ -550,33 +644,33 @@ func (ws *Workspace) copilotDirPath() (string, error) {
 	//
 	// Keep on searching the parent directories for that copilot directory (though only
 	// up to a finite limit, to avoid infinite recursion!)
-	searchingDir := ws.workingDirAbs
-	for try := 0; try < maximumParentDirsToSearch; try++ {
-		currentDirectoryPath := filepath.Join(searchingDir, CopilotDirName)
-		inCurrentDirPath, err := ws.fs.DirExists(currentDirectoryPath)
+	path, err := TraverseUp(ws.workingDirAbs, maximumParentDirsToSearch, func(dir string) (string, error) {
+		path := filepath.Join(dir, CopilotDirName)
+		exists, err := ws.fs.DirExists(path)
 		if err != nil {
 			return "", err
 		}
-		if inCurrentDirPath {
-			ws.copilotDirAbs = currentDirectoryPath
-			return ws.copilotDirAbs, nil
+		if exists {
+			return path, ErrTraverseUpShouldStop
 		}
-		searchingDir = filepath.Dir(searchingDir)
+		return "", nil
+	})
+	if err == nil {
+		return path, nil
 	}
-	return "", &ErrWorkspaceNotFound{
-		CurrentDirectory:      ws.workingDirAbs,
-		ManifestDirectoryName: CopilotDirName,
-		NumberOfLevelsChecked: maximumParentDirsToSearch,
+	var targetNotFoundErr *ErrTargetNotFound
+	if errors.As(err, &targetNotFoundErr) {
+		return "", &ErrWorkspaceNotFound{
+			ErrTargetNotFound: targetNotFoundErr,
+			target:            CopilotDirName,
+		}
 	}
+	return "", err
 }
 
 // write flushes the data to a file under the copilot directory joined by path elements.
 func (ws *Workspace) write(data []byte, elem ...string) (string, error) {
-	copilotPath, err := ws.copilotDirPath()
-	if err != nil {
-		return "", err
-	}
-	pathElems := append([]string{copilotPath}, elem...)
+	pathElems := append([]string{ws.CopilotDirAbs}, elem...)
 	filename := filepath.Join(pathElems...)
 
 	if err := ws.fs.MkdirAll(filepath.Dir(filename), 0755 /* -rwxr-xr-x */); err != nil {
@@ -597,11 +691,7 @@ func (ws *Workspace) write(data []byte, elem ...string) (string, error) {
 
 // read returns the contents of the file under the copilot directory joined by path elements.
 func (ws *Workspace) read(elem ...string) ([]byte, error) {
-	copilotPath, err := ws.copilotDirPath()
-	if err != nil {
-		return nil, err
-	}
-	pathElems := append([]string{copilotPath}, elem...)
+	pathElems := append([]string{ws.CopilotDirAbs}, elem...)
 	filename := filepath.Join(pathElems...)
 	exist, err := ws.fs.Exists(filename)
 	if err != nil {
@@ -611,48 +701,6 @@ func (ws *Workspace) read(elem ...string) ([]byte, error) {
 		return nil, &ErrFileNotExists{FileName: filename}
 	}
 	return ws.fs.ReadFile(filename)
-}
-
-// ListDockerfiles returns the list of Dockerfiles within the current
-// working directory and a sub-directory level below. If an error occurs while
-// reading directories, or no Dockerfiles found returns the error.
-func (ws *Workspace) ListDockerfiles() ([]string, error) {
-	wdFiles, err := ws.fs.ReadDir(ws.workingDirAbs)
-	if err != nil {
-		return nil, fmt.Errorf("read directory: %w", err)
-	}
-	var dockerfiles = make([]string, 0)
-	for _, wdFile := range wdFiles {
-		// Add current file if it is a Dockerfile and not a directory; otherwise continue.
-		if !wdFile.IsDir() {
-			fname := wdFile.Name()
-			if strings.Contains(strings.ToLower(fname), dockerfileName) && !strings.HasSuffix(strings.ToLower(fname), dockerignoreName) {
-				path := filepath.Dir(fname) + "/" + fname
-				dockerfiles = append(dockerfiles, path)
-			}
-			continue
-		}
-
-		// Add sub-directories containing a Dockerfile one level below current directory.
-		subFiles, err := ws.fs.ReadDir(wdFile.Name())
-		if err != nil {
-			// swallow errors for unreadable directories
-			continue
-		}
-		for _, f := range subFiles {
-			// NOTE: ignore directories in sub-directories.
-			if f.IsDir() {
-				continue
-			}
-			fname := f.Name()
-			if strings.Contains(strings.ToLower(fname), dockerfileName) && !strings.HasSuffix(strings.ToLower(fname), dockerignoreName) {
-				path := wdFile.Name() + "/" + f.Name()
-				dockerfiles = append(dockerfiles, path)
-			}
-		}
-	}
-	sort.Strings(dockerfiles)
-	return dockerfiles, nil
 }
 
 func (ws *Workspace) manifestNameMatchWithDir(mft namedManifest, mftDirName string) error {

@@ -35,6 +35,8 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 					SubnetsType:    template.PublicSubnetsPlacement,
 				},
 				CustomResources: customResources,
+				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders with timeout and no retries": {
@@ -48,6 +50,8 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				},
 				ServiceDiscoveryEndpoint: "test.app.local",
 				CustomResources:          customResources,
+				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders with options": {
@@ -62,6 +66,8 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				},
 				ServiceDiscoveryEndpoint: "test.app.local",
 				CustomResources:          customResources,
+				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders with options and addons": {
@@ -81,6 +87,8 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				},
 				ServiceDiscoveryEndpoint: "test.app.local",
 				CustomResources:          customResources,
+				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders with Windows platform": {
@@ -95,6 +103,8 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				},
 				ServiceDiscoveryEndpoint: "test.app.local",
 				CustomResources:          customResources,
+				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 	}
@@ -140,7 +150,18 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 	}{
 		"renders a valid template by default": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck:          defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				ServiceDiscoveryEndpoint: "test.app.local",
 				Network: template.NetworkOpts{
 					AssignPublicIP: template.EnablePublicIP,
@@ -148,12 +169,24 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				},
 				ALBEnabled:      true,
 				CustomResources: customResources,
+				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid grpc template by default": {
 			opts: template.WorkloadOpts{
-				HTTPVersion:              aws.String("GRPC"),
-				HTTPHealthCheck:          defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				ServiceDiscoveryEndpoint: "test.app.local",
 				Network: template.NetworkOpts{
 					AssignPublicIP: template.EnablePublicIP,
@@ -161,11 +194,24 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				},
 				ALBEnabled:      true,
 				CustomResources: customResources,
+				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with addons with no outputs": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck: defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				NestedStack: &template.WorkloadNestedStackOpts{
 					StackName: "AddonsStack",
 				},
@@ -176,11 +222,24 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ServiceDiscoveryEndpoint: "test.app.local",
 				ALBEnabled:               true,
 				CustomResources:          customResources,
+				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders a valid template with addons with outputs": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck: defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				NestedStack: &template.WorkloadNestedStackOpts{
 					StackName:       "AddonsStack",
 					VariableOutputs: []string{"TableName"},
@@ -194,11 +253,24 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ServiceDiscoveryEndpoint: "test.app.local",
 				ALBEnabled:               true,
 				CustomResources:          customResources,
+				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders a valid template with private subnet placement": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck: defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				Network: template.NetworkOpts{
 					AssignPublicIP: template.DisablePublicIP,
 					SubnetsType:    template.PrivateSubnetsPlacement,
@@ -206,11 +278,24 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ServiceDiscoveryEndpoint: "test.app.local",
 				ALBEnabled:               true,
 				CustomResources:          customResources,
+				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders a valid template with all storage options": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck:          defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				ServiceDiscoveryEndpoint: "test.app.local",
 				Network: template.NetworkOpts{
 					AssignPublicIP: template.EnablePublicIP,
@@ -246,11 +331,24 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				},
 				ALBEnabled:      true,
 				CustomResources: customResources,
+				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with minimal storage options": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck:          defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				ServiceDiscoveryEndpoint: "test.app.local",
 				Network: template.NetworkOpts{
 					AssignPublicIP: template.EnablePublicIP,
@@ -281,11 +379,24 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				},
 				ALBEnabled:      true,
 				CustomResources: customResources,
+				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with ephemeral storage": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck: defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				Network: template.NetworkOpts{
 					AssignPublicIP: template.EnablePublicIP,
 					SubnetsType:    template.PublicSubnetsPlacement,
@@ -296,11 +407,24 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				},
 				ALBEnabled:      true,
 				CustomResources: customResources,
+				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with entrypoint and command overrides": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck:          defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				EntryPoint:               []string{"/bin/echo", "hello"},
 				Command:                  []string{"world"},
 				ServiceDiscoveryEndpoint: "test.app.local",
@@ -310,12 +434,25 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				},
 				ALBEnabled:      true,
 				CustomResources: customResources,
+				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with additional addons parameters": {
 			opts: template.WorkloadOpts{
 				ServiceDiscoveryEndpoint: "test.app.local",
-				HTTPHealthCheck:          defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				Network: template.NetworkOpts{
 					AssignPublicIP: template.EnablePublicIP,
 					SubnetsType:    template.PublicSubnetsPlacement,
@@ -326,11 +463,24 @@ DiscoveryServiceArn:
 `,
 				ALBEnabled:      true,
 				CustomResources: customResources,
+				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with Windows platform": {
 			opts: template.WorkloadOpts{
-				HTTPHealthCheck: defaultHttpHealthCheck,
+				ALBListener: &template.ALBListener{
+					Rules: []template.ALBListenerRule{
+						{
+							Path:            "/",
+							TargetPort:      "8080",
+							TargetContainer: "main",
+							HTTPVersion:     "GRPC",
+							HTTPHealthCheck: defaultHttpHealthCheck,
+							Stickiness:      "false",
+						},
+					},
+				},
 				Network: template.NetworkOpts{
 					AssignPublicIP: template.EnablePublicIP,
 					SubnetsType:    template.PublicSubnetsPlacement,
@@ -342,6 +492,8 @@ DiscoveryServiceArn:
 				ServiceDiscoveryEndpoint: "test.app.local",
 				ALBEnabled:               true,
 				CustomResources:          customResources,
+				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 	}
@@ -403,9 +555,10 @@ func TestTemplate_ParseNetwork(t *testing.T) {
 			input: template.NetworkOpts{
 				AssignPublicIP: "DISABLED",
 				SubnetsType:    "PrivateSubnets",
-				SecurityGroups: []string{
-					"sg-1bcf1d5b",
-					"sg-asdasdas",
+				SecurityGroups: []template.SecurityGroup{
+					template.PlainSecurityGroup("sg-1bcf1d5b"),
+					template.PlainSecurityGroup("sg-asdasdas"),
+					template.ImportedSecurityGroup("mydb-sg001"),
 				},
 			},
 			wantedNetworkConfig: `
@@ -419,15 +572,16 @@ func TestTemplate_ParseNetwork(t *testing.T) {
      - Fn::ImportValue: !Sub '${AppName}-${EnvName}-EnvironmentSecurityGroup'
      - "sg-1bcf1d5b"
      - "sg-asdasdas"
+     - Fn::ImportValue: mydb-sg001
 `,
 		},
 		"should render AWS VPC configuration without default environment security group": {
 			input: template.NetworkOpts{
 				AssignPublicIP: "DISABLED",
 				SubnetsType:    "PrivateSubnets",
-				SecurityGroups: []string{
-					"sg-1bcf1d5b",
-					"sg-asdasdas",
+				SecurityGroups: []template.SecurityGroup{
+					template.PlainSecurityGroup("sg-1bcf1d5b"),
+					template.PlainSecurityGroup("sg-asdasdas"),
 				},
 				DenyDefaultSecurityGroup: true,
 			},

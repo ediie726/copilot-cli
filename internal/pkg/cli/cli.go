@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/dustin/go-humanize/english"
+	"github.com/spf13/afero"
 
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
 
@@ -30,7 +30,7 @@ const (
 // tryReadingAppName retrieves the application's name from the workspace if it exists and returns it.
 // If there is an error while retrieving the workspace summary, returns the empty string.
 func tryReadingAppName() string {
-	ws, err := workspace.New()
+	ws, err := workspace.Use(afero.NewOsFs())
 	if err != nil {
 		return ""
 	}
@@ -118,22 +118,40 @@ func logRecommendedActions(actions []string) {
 
 func indentListItem(multiline string) string {
 	var prefixedLines []string
+	var inCodeBlock bool
 	for i, line := range strings.Split(multiline, "\n") {
-		prefix := "    "
-		if i == 0 {
+		if strings.Contains(line, "```") {
+			inCodeBlock = !inCodeBlock
+		}
+		var prefix string
+		switch {
+		case i == 0:
 			prefix = "  - "
+		case inCodeBlock, strings.Contains(line, "```"):
+			prefix = ""
+		default:
+			prefix = "    "
 		}
 		prefixedLines = append(prefixedLines, fmt.Sprintf("%s%s", prefix, line))
 	}
 	return strings.Join(prefixedLines, "\n")
 }
 
-func quoteStringSlice(in []string) []string {
-	quoted := make([]string, len(in))
-	for idx, str := range in {
-		quoted[idx] = strconv.Quote(str)
+func indentBy(multiline string, indentCount int) string {
+	var prefixedLines []string
+	for _, line := range strings.Split(multiline, "\n") {
+		prefix := strings.Repeat(" ", indentCount)
+		prefixedLines = append(prefixedLines, fmt.Sprintf("%s%s", prefix, line))
 	}
-	return quoted
+	return strings.Join(prefixedLines, "\n")
+}
+
+func applyAll[T any](in []T, fn func(item T) T) []T {
+	out := make([]T, len(in))
+	for i, v := range in {
+		out[i] = fn(v)
+	}
+	return out
 }
 
 // displayPath takes any path and returns it in a form ready to be displayed to

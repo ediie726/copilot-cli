@@ -9,8 +9,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/aws/copilot-cli/internal/pkg/addon"
+	"github.com/aws/copilot-cli/internal/pkg/template/templatetest"
+
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
+
+	"github.com/aws/copilot-cli/internal/pkg/addon"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
@@ -28,7 +32,7 @@ var (
 var testRDWebServiceManifest = &manifest.RequestDrivenWebService{
 	Workload: manifest.Workload{
 		Name: aws.String(testServiceName),
-		Type: aws.String(manifest.RequestDrivenWebServiceType),
+		Type: aws.String(manifestinfo.RequestDrivenWebServiceType),
 	},
 	RequestDrivenWebServiceConfig: manifest.RequestDrivenWebServiceConfig{
 		ImageConfig: manifest.ImageWithPort{
@@ -38,13 +42,14 @@ var testRDWebServiceManifest = &manifest.RequestDrivenWebService{
 			CPU:    aws.Int(256),
 			Memory: aws.Int(512),
 		},
-		Variables: map[string]string{
-			"LOG_LEVEL": "info",
-			"NODE_ENV":  "development",
+		Variables: map[string]manifest.Variable{
+			"LOG_LEVEL": {},
+			"NODE_ENV":  {},
 		},
+		Secrets: map[string]manifest.Secret{"foo": {}},
 		RequestDrivenWebServiceHttpConfig: manifest.RequestDrivenWebServiceHttpConfig{
 			HealthCheckConfiguration: manifest.HealthCheckArgsOrString{
-				HealthCheckPath: aws.String("/"),
+				Union: manifest.BasicToUnion[string, manifest.HTTPHealthCheckArgs]("/"),
 			},
 		},
 		Tags: map[string]string{
@@ -54,12 +59,18 @@ var testRDWebServiceManifest = &manifest.RequestDrivenWebService{
 }
 
 func TestRequestDrivenWebService_NewRequestDrivenWebService(t *testing.T) {
+	t.Cleanup(func() {
+		fs = realEmbedFS
+	})
+	fs = templatetest.Stub{}
+
 	type testInput struct {
-		mft     *manifest.RequestDrivenWebService
-		env     string
-		rc      RuntimeConfig
-		appInfo deploy.AppInformation
-		urls    map[string]string
+		mft        *manifest.RequestDrivenWebService
+		env        string
+		rc         RuntimeConfig
+		bucketName string
+		appInfo    deploy.AppInformation
+		urls       map[string]string
 	}
 
 	testCases := map[string]struct {
@@ -73,10 +84,13 @@ func TestRequestDrivenWebService_NewRequestDrivenWebService(t *testing.T) {
 			input: testInput{
 				mft: testRDWebServiceManifest,
 				env: testEnvName,
-				rc:  RuntimeConfig{},
+				rc: RuntimeConfig{
+					Region: "us-west-2",
+				},
 				appInfo: deploy.AppInformation{
 					Name: testAppName,
 				},
+				bucketName: "mockbucket",
 				urls: map[string]string{
 					"custom-domain-app-runner": "mockURL1",
 					"aws-sdk-layer":            "mockURL2",
@@ -86,10 +100,16 @@ func TestRequestDrivenWebService_NewRequestDrivenWebService(t *testing.T) {
 			wantedStack: &RequestDrivenWebService{
 				appRunnerWkld: &appRunnerWkld{
 					wkld: &wkld{
-						name:  aws.StringValue(testRDWebServiceManifest.Name),
-						env:   testEnvName,
-						app:   testAppName,
-						rc:    RuntimeConfig{},
+						name: aws.StringValue(testRDWebServiceManifest.Name),
+						env:  testEnvName,
+						app:  testAppName,
+						rc: RuntimeConfig{
+							CustomResourcesURL: map[string]string{
+								"CustomDomainFunction":  "https://.s3.us-west-2.amazonaws.com/manual/scripts/custom-resources/customdomainfunction/8932747ba5dbff619d89b92d0033ef1d04f7dd1b055e073254907d4e38e3976d.zip",
+								"EnvControllerFunction": "https://.s3.us-west-2.amazonaws.com/manual/scripts/custom-resources/envcontrollerfunction/8932747ba5dbff619d89b92d0033ef1d04f7dd1b055e073254907d4e38e3976d.zip",
+							},
+							Region: "us-west-2",
+						},
 						image: testRDWebServiceManifest.ImageConfig.Image,
 					},
 					instanceConfig: testRDWebServiceManifest.InstanceConfig,
@@ -108,7 +128,7 @@ func TestRequestDrivenWebService_NewRequestDrivenWebService(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			addons := mocks.NewMockaddons(ctrl)
+			addons := mocks.NewMockNestedStackConfigurer(ctrl)
 
 			stack, err := NewRequestDrivenWebService(RequestDrivenWebServiceConfig{
 				App:           tc.input.appInfo,
@@ -128,7 +148,6 @@ func TestRequestDrivenWebService_NewRequestDrivenWebService(t *testing.T) {
 			require.Equal(t, tc.wantedStack.instanceConfig, stack.instanceConfig)
 			require.Equal(t, tc.wantedStack.imageConfig, stack.imageConfig)
 			require.NotNil(t, stack.addons)
-			require.NotNil(t, stack.parser)
 		})
 	}
 }
@@ -167,12 +186,17 @@ func TestRequestDrivenWebService_Template(t *testing.T) {
 				addons := mockAddons{}
 				mockParser.EXPECT().ParseRequestDrivenWebService(gomock.Any()).DoAndReturn(func(actual template.WorkloadOpts) (*template.Content, error) {
 					require.Equal(t, template.WorkloadOpts{
-						AppName:           "phonetool",
-						EnvName:           "test",
-						WorkloadName:      "frontend",
-						WorkloadType:      manifest.RequestDrivenWebServiceType,
-						Variables:         c.manifest.Variables,
+						AppName:      "phonetool",
+						EnvName:      "test",
+						WorkloadName: "frontend",
+						WorkloadType: manifestinfo.RequestDrivenWebServiceType,
+						Variables: map[string]template.Variable{
+							"LOG_LEVEL": template.PlainVariable(""),
+							"NODE_ENV":  template.PlainVariable(""),
+						},
+						Secrets:           map[string]template.Secret{"foo": template.SecretFromPlainSSMOrARN("")},
 						Tags:              c.manifest.Tags,
+						Count:             c.manifest.Count,
 						EnableHealthCheck: true,
 						Alias:             aws.String("convex.domain.com"),
 						CustomResources: map[string]template.S3ObjectLocation{
@@ -203,8 +227,9 @@ func TestRequestDrivenWebService_Template(t *testing.T) {
 						AppName:                  "phonetool",
 						EnvName:                  "test",
 						WorkloadName:             "frontend",
-						WorkloadType:             manifest.RequestDrivenWebServiceType,
-						Variables:                c.manifest.Variables,
+						WorkloadType:             manifestinfo.RequestDrivenWebServiceType,
+						Variables:                convertEnvVars(c.manifest.Variables),
+						Secrets:                  convertSecrets(c.manifest.RequestDrivenWebServiceConfig.Secrets),
 						Tags:                     c.manifest.Tags,
 						ServiceDiscoveryEndpoint: mockSD,
 						EnableHealthCheck:        true,
@@ -247,8 +272,9 @@ Outputs:
 						AppName:                  "phonetool",
 						EnvName:                  "test",
 						WorkloadName:             "frontend",
-						WorkloadType:             manifest.RequestDrivenWebServiceType,
-						Variables:                c.manifest.Variables,
+						WorkloadType:             manifestinfo.RequestDrivenWebServiceType,
+						Variables:                convertEnvVars(c.manifest.Variables),
+						Secrets:                  convertSecrets(c.manifest.RequestDrivenWebServiceConfig.Secrets),
 						Tags:                     c.manifest.Tags,
 						ServiceDiscoveryEndpoint: mockSD,
 						NestedStack: &template.WorkloadNestedStackOpts{
@@ -309,9 +335,11 @@ Outputs:
 						env:  testEnvName,
 						app:  testAppName,
 						rc: RuntimeConfig{
-							Image: &ECRImage{
-								RepoURL:  testImageRepoURL,
-								ImageTag: testImageTag,
+							PushedImages: map[string]ECRImage{
+								"testServiceName": {
+									RepoURL:  testImageRepoURL,
+									ImageTag: testImageTag,
+								},
 							},
 							ServiceDiscoveryEndpoint: mockSD,
 							AccountID:                "0123456789012",
@@ -350,8 +378,12 @@ func TestRequestDrivenWebService_Parameters(t *testing.T) {
 	}{
 		"all required fields specified": {
 			imageConfig: manifest.ImageWithPort{
-				Image: manifest.Image{Location: aws.String("public.ecr.aws/aws-containers/hello-app-runner:latest")},
-				Port:  aws.Uint16(80),
+				Image: manifest.Image{
+					ImageLocationOrBuild: manifest.ImageLocationOrBuild{
+						Location: aws.String("public.ecr.aws/aws-containers/hello-app-runner:latest"),
+					},
+				},
+				Port: aws.Uint16(80),
 			},
 			instanceConfig: manifest.AppRunnerInstanceConfig{
 				CPU:    aws.Int(1024),
@@ -388,7 +420,11 @@ func TestRequestDrivenWebService_Parameters(t *testing.T) {
 		},
 		"error when port unspecified": {
 			imageConfig: manifest.ImageWithPort{
-				Image: manifest.Image{Location: aws.String("public.ecr.aws/aws-containers/hello-app-runner:latest")},
+				Image: manifest.Image{
+					ImageLocationOrBuild: manifest.ImageLocationOrBuild{
+						Location: aws.String("public.ecr.aws/aws-containers/hello-app-runner:latest"),
+					},
+				},
 			},
 			instanceConfig: manifest.AppRunnerInstanceConfig{
 				CPU:    aws.Int(1024),
@@ -398,8 +434,12 @@ func TestRequestDrivenWebService_Parameters(t *testing.T) {
 		},
 		"error when CPU unspecified": {
 			imageConfig: manifest.ImageWithPort{
-				Port:  aws.Uint16(80),
-				Image: manifest.Image{Location: aws.String("public.ecr.aws/aws-containers/hello-app-runner:latest")},
+				Port: aws.Uint16(80),
+				Image: manifest.Image{
+					ImageLocationOrBuild: manifest.ImageLocationOrBuild{
+						Location: aws.String("public.ecr.aws/aws-containers/hello-app-runner:latest"),
+					},
+				},
 			},
 			instanceConfig: manifest.AppRunnerInstanceConfig{
 				Memory: aws.Int(1024),
@@ -408,8 +448,12 @@ func TestRequestDrivenWebService_Parameters(t *testing.T) {
 		},
 		"error when memory unspecified": {
 			imageConfig: manifest.ImageWithPort{
-				Port:  aws.Uint16(80),
-				Image: manifest.Image{Location: aws.String("public.ecr.aws/aws-containers/hello-app-runner:latest")},
+				Port: aws.Uint16(80),
+				Image: manifest.Image{
+					ImageLocationOrBuild: manifest.ImageLocationOrBuild{
+						Location: aws.String("public.ecr.aws/aws-containers/hello-app-runner:latest"),
+					},
+				},
 			},
 			instanceConfig: manifest.AppRunnerInstanceConfig{
 				CPU: aws.Int(1024),
@@ -444,62 +488,45 @@ func TestRequestDrivenWebService_Parameters(t *testing.T) {
 }
 
 func TestRequestDrivenWebService_SerializedParameters(t *testing.T) {
-	testCases := map[string]struct {
-		mockDependencies func(ctrl *gomock.Controller, c *RequestDrivenWebService)
-
-		wantedParams string
-		wantedError  error
-	}{
-		"unavailable template": {
-			mockDependencies: func(ctrl *gomock.Controller, c *RequestDrivenWebService) {
-				m := mocks.NewMockrequestDrivenWebSvcReadParser(ctrl)
-				m.EXPECT().Parse(wkldParamsTemplatePath, gomock.Any(), gomock.Any()).Return(nil, errors.New("serialization error"))
-				c.wkld.parser = m
-			},
-			wantedParams: "",
-			wantedError:  errors.New("serialization error"),
-		},
-		"render params template": {
-			mockDependencies: func(ctrl *gomock.Controller, c *RequestDrivenWebService) {
-				m := mocks.NewMockrequestDrivenWebSvcReadParser(ctrl)
-				m.EXPECT().Parse(wkldParamsTemplatePath, gomock.Any(), gomock.Any()).Return(&template.Content{Buffer: bytes.NewBufferString("params")}, nil)
-				c.wkld.parser = m
-			},
-			wantedParams: "params",
-		},
-	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			// GIVEN
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			c := &RequestDrivenWebService{
-				appRunnerWkld: &appRunnerWkld{
-					wkld: &wkld{
-						name: aws.StringValue(testRDWebServiceManifest.Name),
-						env:  testEnvName,
-						app:  testAppName,
-						rc: RuntimeConfig{
-							Image: &ECRImage{
-								RepoURL:  testImageRepoURL,
-								ImageTag: testImageTag,
-							},
+	c := &RequestDrivenWebService{
+		appRunnerWkld: &appRunnerWkld{
+			wkld: &wkld{
+				name: aws.StringValue(testRDWebServiceManifest.Name),
+				env:  testEnvName,
+				app:  testAppName,
+				rc: RuntimeConfig{
+					PushedImages: map[string]ECRImage{
+						aws.StringValue(testRDWebServiceManifest.Name): {
+							RepoURL:  testImageRepoURL,
+							ImageTag: testImageTag,
 						},
 					},
-					instanceConfig: testRDWebServiceManifest.InstanceConfig,
-					imageConfig:    testRDWebServiceManifest.ImageConfig,
 				},
-				manifest: testRDWebServiceManifest,
-			}
-			tc.mockDependencies(ctrl, c)
-
-			// WHEN
-			params, err := c.SerializedParameters()
-
-			// THEN
-			require.Equal(t, tc.wantedError, err)
-			require.Equal(t, tc.wantedParams, params)
-		})
+			},
+			instanceConfig: testRDWebServiceManifest.InstanceConfig,
+			imageConfig:    testRDWebServiceManifest.ImageConfig,
+		},
+		manifest: testRDWebServiceManifest,
 	}
+
+	params, err := c.SerializedParameters()
+	require.NoError(t, err)
+	require.Equal(t, params, `{
+  "Parameters": {
+    "AddonsTemplateURL": "",
+    "AppName": "phonetool",
+    "ContainerImage": "111111111111.dkr.ecr.us-west-2.amazonaws.com/phonetool/frontend:manual-bf3678c",
+    "ContainerPort": "80",
+    "EnvName": "test",
+    "ImageRepositoryType": "ECR",
+    "InstanceCPU": "256",
+    "InstanceMemory": "512",
+    "WorkloadName": "frontend"
+  },
+  "Tags": {
+    "copilot-application": "phonetool",
+    "copilot-environment": "test",
+    "copilot-service": "frontend"
+  }
+}`)
 }

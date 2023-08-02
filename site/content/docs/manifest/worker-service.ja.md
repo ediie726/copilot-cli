@@ -1,24 +1,26 @@
 以下は `'Worker Service'` Manifest で利用できるすべてのプロパティのリストです。[Service の概念](../concepts/services.ja.md)説明のページも合わせてご覧ください。
 
-???+ note "Worker Service の Manifest のサンプル"
+???+ note "Worker Service の サンプル Manifest"
 
-    ```yaml
-        # Service 名は、ロググループや ECS サービスなどのリソースの命名に使用されます。
-        name: orders-worker
+    === "Single queue"
+
+        ```yaml
+        # 他の Service から発行された複数のトピックから、単一の SQS キューにメッセージを集めます。
+        name: cost-analyzer
         type: Worker Service
 
         image:
-          build: ./orders/Dockerfile
+          build: ./cost-analyzer/Dockerfile
 
         subscribe:
           topics:
-            - name: events
-              service: api
+            - name: products
+              service: orders
               filter_policy:
                 event:
                 - anything-but: order_cancelled
-            - name: events
-              service: fe
+            - name: inventory
+              service: warehouse
           queue:
             retention: 96h
             timeout: 30s
@@ -27,27 +29,70 @@
 
         cpu: 256
         memory: 512
-        count: 1
+        count: 3
         exec: true
 
-        variables:
-          LOG_LEVEL: info
-        env_file: log.env
         secrets:
-          GITHUB_TOKEN: GITHUB_TOKEN
+          DB:
+            secretsmanager: '${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/mysql'
+        ```
 
-        # 上記で定義された値は、environment で上書きすることができます。
-        environments:
-          production:
-            count:
-              range:
-                min: 1
-                max: 50
-                spot_from: 26
-              queue_delay:
-                acceptable_latency: 1m
-                msg_processing_time: 250ms
-    ```
+    === "Spot autoscaling"
+
+        ```yaml
+        # キャパシティに余裕がある場合は、Fargate Spot のタスクにバーストします。
+        name: cost-analyzer
+        type: Worker Service
+
+        image:
+          build: ./cost-analyzer/Dockerfile
+
+        subscribe:
+          topics:
+            - name: products
+              service: orders
+            - name: inventory
+              service: warehouse
+
+        cpu: 256
+        memory: 512
+        count:
+          range:
+            min: 1
+            max: 10
+            spot_from: 2
+          queue_delay: # 1 つのメッセージ処理に 250ms かかると仮定して、10 分以内にメッセージが処理されることを確認します。
+            acceptable_latency: 10m
+            msg_processing_time: 250ms
+        exec: true
+        ```
+
+    === "Separate queues"
+
+        ```yaml
+        # 各トピックに個別のキューを割り当てます。
+        name: cost-analyzer
+        type: Worker Service
+
+        image:
+          build: ./cost-analyzer/Dockerfile
+
+        subscribe:
+          topics:
+            - name: products
+              service: orders
+              queue:
+                retention: 5d
+                timeout: 1h
+                dead_letter:
+                  tries: 3
+            - name: inventory
+              service: warehouse
+              queue:
+                retention: 1d
+                timeout: 5m
+        count: 1
+        ```
 
 <a id="name" href="#name" class="field">`name`</a> <span class="type">String</span>  
 Service の名前。
@@ -63,6 +108,8 @@ Service のアーキテクチャタイプ。[Worker Service](../concepts/service
 
 <a id="subscribe" href="#subscribe" class="field">`subscribe`</a> <span class="type">Map</span>  
 `subscribe` セクションでは、Worker Service が、同じ Application や Environment にある他の Copilot Service が公開する SNS トピックへのサブスクリプションを作成できるようにします。各トピックは独自の SQS キューを定義できますが、デフォルトではすべてのトピックが Worker Service のデフォルトキューにサブスクライブされます。
+
+デフォルトキューの URI は、環境変数 `COPILOT_QUEUE_URI` としてコンテナにインジェクトされます。
 
 ```yaml
 subscribe:
@@ -88,8 +135,51 @@ subscribe:
 <span class="parent-field">subscribe.queue.</span><a id="subscribe-queue-retention" href="#subscribe-queue-retention" class="field">`retention`</a> <span class="type">Duration</span>  
 Retention はメッセージが削除される前にキューに残っている時間を指定します。デフォルトは 4 日です。指定できる範囲は 60 秒 - 336 時間です。
 
-<span class="parent-field">subscribe.queue.</span><a id="subscribe-queue-timeout" href="#subscribe-queue-timeout" class="field">`timeout`</a> <span class="type">Duration</span>  
+<span class="parent-field">subscribe.queue.</span><a id="subscribe-queue-timeout" href="#subscribe-queue-timeout" class="field">`timeout`</a> <span class="type">Duration</span>
 Timeout はメッセージが配信された後に利用できない時間の長さを定義します。デフォルトは 30 秒です。範囲は 0 秒 - 12 時間です。
+
+<span class="parent-field">subscribe.queue.</span><a id="subscribe-queue-fifo" href="#subscribe-queue-fifo" class="field">`fifo`</a> <span class="type">Boolean or Map</span>
+SQS キューで FIFO (first in, first out) 順を有効化します。操作やイベントの順番が重要であったり、重複が許容されないシナリオに対処します。
+
+```yaml
+subscribe:
+  topics:
+    - name: events
+      service: api
+    - name: events
+      service: fe
+  queue: # 両方の FIFO SNS トピックからのメッセージは、 共有の FIFO SQS キューに入ります。
+    fifo: true
+```
+キューで FIFO 機能を有効化する場合、Copilot はソース SNS トピックも[FIFO](../include/publish.ja.md#publish-topics-topic-fifo)であることを要求します。
+
+または、 高度な SQS FIFO キュー設定を指定できます。
+```yaml
+subscribe:
+  topics:
+    - name: events
+      service: api
+      queue: # api-event トピックに対応した標準キューを定義します。
+        timeout: 20s
+    - name: events
+      service: fe
+  queue: # デフォルトでは、全ての FIFO トピックからのメッセージは、共有の FIFO SQS キューに入ります。
+    fifo:
+      content_based_deduplication: true
+      high_throughput: true
+```
+
+<span class="parent-field">subscribe.queue.fifo.</span><a id="subscribe-queue-fifo-content-based-deduplication" href="#subscribe-queue-fifo-content-based-deduplication" class="field">`content_based_deduplication`</a> <span class="type">Boolean</span>
+パブリッシュされたメッセージごとにメッセージ本文が一意である事が保証されている場合、SNS FIFO トピックのコンテンツベースの重複排除を有効化できます。
+
+<span class="parent-field">subscribe.queue.fifo.</span><a id="subscribe-queue-fifo-deduplication-scope" href="#subscribe-queue-fifo-deduplication-scope" class="field">`deduplication_scope`</a> <span class="type">String</span>
+FIFO キューで高スループットが必要な場合、メッセージ重複排除をメッセージグループで行うかキュー全体で行うかを指定します。設定可能な値は、"messageGroup" と "queue" です。
+
+<span class="parent-field">subscribe.queue.fifo.</span><a id="subscribe-queue-fifo-throughput-limit" href="#subscribe-queue-fifo-throughput-limit" class="field">`throughput_limit`</a> <span class="type">String</span>
+FIFO キューで高スループットが必要な場合、FIFO キュースループットの上限をキュー全体に適用するか、メッセージグループ単位で適用するかを指定します。設定可能な値は、"perQueue" と "perMessageGroupId" です。
+
+<span class="parent-field">subscribe.queue.fifo.</span><a id="subscribe-queue-fifo-high-throughput" href="#subscribe-queue-fifo-high-throughput" class="field">`high_throughput`</a> <span class="type">Boolean</span>
+有効にした場合、 FIFO キューにおいて、より高い秒間トランザクション (TPS) が利用できます。`deduplication_scope` および `throughput_limit` と相互排他的です。
 
 <span class="parent-field">subscribe.queue.dead_letter.</span><a id="subscribe-queue-dead-letter-tries" href="#subscribe-queue-dead-letter-tries" class="field">`tries`</a> <span class="type">Integer</span>  
 指定された場合、DLQ(デッドレターキュー)を作成し、メッセージを `tries` 回試行した後に DLQ にルーティングするリドライブポリシーを設定します。つまり、Worker Service がメッセージの処理に `tries` 回成功しなかった場合、メッセージ送信はリトライされません。 メッセージは DLQ にルーティングされるため、あとからメッセージの内容を確認して失敗の原因分析に役立てることができます。
@@ -97,20 +187,18 @@ Timeout はメッセージが配信された後に利用できない時間の長
 <span class="parent-field">subscribe.</span><a id="subscribe-topics" href="#subscribe-topics" class="field">`topics`</a> <span class="type">Array of `topic`s</span>  
 Worker Service がサブスクライブすべき SNS トピックの情報が含まれています。
 
-<span class="parent-field">topic.</span><a id="topic-name" href="#topic-name" class="field">`name`</a> <span class="type">String</span>  
+<span class="parent-field">subscribe.topics.topic</span><a id="topic-name" href="#topic-name" class="field">`name`</a> <span class="type">String</span>  
 必須項目。サブスクライブする SNS トピックの名前。
 
-<span class="parent-field">topic.</span><a id="topic-service" href="#topic-service" class="field">`service`</a> <span class="type">String</span>  
+<span class="parent-field">subscribe.topics.topic</span><a id="topic-service" href="#topic-service" class="field">`service`</a> <span class="type">String</span>  
 必須項目。この SNS トピックが公開されているサービスです。トピック名と合わせて、Copilot Environment 内で SNS トピックを一意に識別します。
 
-<span class="parent-field">topic.</span><a id="topic-filter-policy" href="#topic-filter-policy" class="field">`filter_policy`</a> <span class="type">Map</span>  
+<span class="parent-field">subscribe.topics.topic</span><a id="topic-filter-policy" href="#topic-filter-policy" class="field">`filter_policy`</a> <span class="type">Map</span>  
 任意項目。SNS サブスクリプションフィルターポリシーを指定します。このポリシーは、着信メッセージの属性を評価します。フィルターポリシーは JSON で指定します。例えば以下の様になります。
-
 ```json
 filter_policy: {"store":["example_corp"],"event":[{"anything-but":"order_cancelled"}],"customer_interests":["rugby","football","baseball"],"price_usd":[{"numeric":[">=",100]}]}
 ```
 または、YAML の MAP を利用して記述します。
-
 ```yaml
 filter_policy:
   store:
@@ -128,9 +216,25 @@ filter_policy:
 ```
 フィルターポリシーの書き方に関するさらに詳しい情報については、[SNS documentation](https://docs.aws.amazon.com/sns/latest/dg/sns-subscription-filter-policies.html)を確認してください。
 
-
-<span class="parent-field">topic.</span><a id="topic-queue" href="#topic-queue" class="field">`queue`</a> <span class="type">Boolean or Map</span>
+<span class="parent-field">subscribe.topics.topic.</span><a id="topic-queue" href="#topic-queue" class="field">`queue`</a> <span class="type">Boolean or Map</span>
 任意項目。トピックに対する SQS キューの設定です。`true` を指定した場合、キューはデフォルト設定で作成されます。トピックに対応したキューに関する特性の属性についてカスタマイズする場合は、このフィールドを Map で指定します。
+1 つ以上のトピック固有キューを指定した場合、`COPILOT_TOPIC_QUEUE_URIS` 変数を使ってそれらのキュー URI にアクセスできます。この変数は、トピック固有のキューの一意な識別子からその URI への JSON Map です。
+
+例えば、`merchant` Service からの `orders` トピックと `merchant` Service からの FIFO トピック `transactions` のトピック別キューを持つワーカーサービスは、以下のような JSON 構造を持つことになります。
+
+```json
+// COPILOT_TOPIC_QUEUE_URIS
+{
+  "merchantOrdersEventsQueue": "https://sqs.eu-central-1.amazonaws.com/...",
+  "merchantTransactionsfifoEventsQueue": "https://sqs.eu-central-1.amazonaws.com/..."
+}
+```
+
+<span class="parent-field">subscribe.topics.topic.queue.</span><a id="subscribe-topics-topic-queue-fifo" href="#subscribe-topics-topic-queue-fifo" class="field">`fifo`</a> <span class="type">Boolean or Map</span>
+任意項目。トピックの SQS FIFO キューに対する設定です。`true` を指定した場合、 FIFO キューがデフォルトの FIFO 設定で作成されます。
+トピックに対応したキューに対する特定の属性についてカスタマイズする場合は、このフィールドを Map で指定します。
+
+{% include 'image.ja.md' %}
 
 {% include 'image-config.ja.md' %}
 
@@ -164,10 +268,17 @@ count:
 count:
   range: 1-10
   cpu_percentage: 70
-  memory_percentage: 80
+  memory_percentage:
+    value: 80
+    cooldown:
+      in: 80s
+      out: 160s
   queue_delay:
     acceptable_latency: 10m
     msg_processing_time: 250ms
+    cooldown:
+      in: 30s
+      out: 60s
 ```
 
 <span class="parent-field">count.</span><a id="count-range" href="#count-range" class="field">`range`</a> <span class="type">String or Map</span>
@@ -190,16 +301,34 @@ count:
 
 上記の例では Application Auto Scaling は 1-10 の範囲で設定されますが、最初の２タスクはオンデマンド Fargate キャパシティに配置されます。Service が３つ以上のタスクを実行するようにスケールした場合、３つ目以降のタスクは最大タスク数に達するまで Fargate Spot に配置されます。
 
-<span class="parent-field">range.</span><a id="count-range-min" href="#count-range-min" class="field">`min`</a> <span class="type">Integer</span>
+<span class="parent-field">count.range.</span><a id="count-range-min" href="#count-range-min" class="field">`min`</a> <span class="type">Integer</span>
 Service がオートスケーリングを利用する場合の最小タスク数。
 
-<span class="parent-field">range.</span><a id="count-range-max" href="#count-range-max" class="field">`max`</a> <span class="type">Integer</span>
+<span class="parent-field">count.range.</span><a id="count-range-max" href="#count-range-max" class="field">`max`</a> <span class="type">Integer</span>
 Service がオートスケーリングを利用する場合の最大タスク数。
 
-<span class="parent-field">range.</span><a id="count-range-spot-from" href="#count-range-spot-from" class="field">`spot_from`</a> <span class="type">Integer</span>
+<span class="parent-field">count.range.</span><a id="count-range-spot-from" href="#count-range-spot-from" class="field">`spot_from`</a> <span class="type">Integer</span>
 Service の何個目のタスクから Fargate Spot キャパシティプロバイダーを利用するか。
 
-<span class="parent-field">count.</span><a id="count-cpu-percentage" href="#count-cpu-percentage" class="field">`cpu_percentage`</a> <span class="type">Integer</span>
+<span class="parent-field">count.</span><a id="count-cooldown" href="#count-cooldown" class="field">`cooldown`</a> <span class="type">Map</span>
+指定されたすべてのオートスケーリングフィールドのデフォルトクールダウンとして使用されるクールダウンスケーリングフィールド。
+
+<span class="parent-field">count.cooldown.</span><a id="count-cooldown-in" href="#count-cooldown-in" class="field">`in`</a> <span class="type">Duration</span>
+Service をスケールアップするためのオートスケーリングクールダウン時間。
+
+<span class="parent-field">count.cooldown.</span><a id="count-cooldown-out" href="#count-cooldown-out" class="field">`out`</a> <span class="type">Duration</span>
+Service をスケールダウンさせるためのオートスケーリングクールダウン時間。
+
+`cpu_percentage` および `memory_percentage`  は `count` のオートスケーリングフィールドであり、フィールドの値として定義するか、または `value` と `cooldown` にて関連する詳細情報を含むマップとして定義することができます。
+```yaml
+value: 50
+cooldown:
+  in: 30s
+  out: 60s
+```
+The cooldown specified here will override the default cooldown.
+
+<span class="parent-field">count.</span><a id="count-cpu-percentage" href="#count-cpu-percentage" class="field">`cpu_percentage`</a> <span class="type">Integer or Map</span>
 Service が保つべき平均 CPU 使用率を指定し、それによってスケールアップ・ダウンします。
 
 <span class="parent-field">count.</span><a id="count-memory-percentage" href="#count-memory-percentage" class="field">`memory_percentage`</a> <span class="type">Integer</span>
@@ -219,6 +348,14 @@ SQS メッセージ 1 件あたりの平均処理時間。例えば、`"250ms"`�
 {% include 'exec.ja.md' %}
 
 {% include 'deployment.ja.md' %}
+
+```yaml 
+deployment:
+  rollback_alarms:
+    cpu_utilization: 70    // Percentage value at or above which alarm is triggered.
+    memory_utilization: 50 // Percentage value at or above which alarm is triggered.
+    messages_delayed: 5    // Number of delayed messages in the queue at or above which alarm is triggered. 
+```
 
 {% include 'entrypoint.ja.md' %}
 

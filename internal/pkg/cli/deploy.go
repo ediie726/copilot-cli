@@ -10,6 +10,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/aws/copilot-cli/internal/pkg/aws/identity"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
+	"github.com/aws/copilot-cli/internal/pkg/version"
+	"github.com/spf13/afero"
 
 	"github.com/aws/copilot-cli/internal/pkg/exec"
 
@@ -53,9 +56,9 @@ func newDeployOpts(vars deployWkldVars) (*deployOpts, error) {
 		return nil, fmt.Errorf("default session: %v", err)
 	}
 	store := config.NewSSMStore(identity.New(defaultSess), ssm.New(defaultSess), aws.StringValue(defaultSess.Config.Region))
-	ws, err := workspace.New()
+	ws, err := workspace.Use(afero.NewOsFs())
 	if err != nil {
-		return nil, fmt.Errorf("new workspace: %w", err)
+		return nil, err
 	}
 	prompter := prompt.New()
 	return &deployOpts{
@@ -67,7 +70,7 @@ func newDeployOpts(vars deployWkldVars) (*deployOpts, error) {
 
 		setupDeployCmd: func(o *deployOpts, workloadType string) {
 			switch {
-			case contains(workloadType, manifest.JobTypes()):
+			case contains(workloadType, manifestinfo.JobTypes()):
 				opts := &deployJobOpts{
 					deployWkldVars: o.deployWkldVars,
 
@@ -83,7 +86,7 @@ func newDeployOpts(vars deployWkldVars) (*deployOpts, error) {
 					return newJobDeployer(opts)
 				}
 				o.deployWkld = opts
-			case contains(workloadType, manifest.ServiceTypes()):
+			case contains(workloadType, manifestinfo.ServiceTypes()):
 				opts := &deploySvcOpts{
 					deployWkldVars: o.deployWkldVars,
 
@@ -96,6 +99,7 @@ func newDeployOpts(vars deployWkldVars) (*deployOpts, error) {
 					prompt:          o.prompt,
 					cmd:             exec.NewCmd(),
 					sessProvider:    sessProvider,
+					templateVersion: version.LatestTemplateVersion(),
 				}
 				opts.newSvcDeployer = func() (workloadDeployer, error) {
 					return newSvcDeployer(opts)
@@ -191,6 +195,7 @@ func BuildDeployCmd() *cobra.Command {
 	cmd.Flags().StringToStringVar(&vars.resourceTags, resourceTagsFlag, nil, resourceTagsFlagDescription)
 	cmd.Flags().BoolVar(&vars.forceNewUpdate, forceFlag, false, forceFlagDescription)
 	cmd.Flags().BoolVar(&vars.disableRollback, noRollbackFlag, false, noRollbackFlagDescription)
+	cmd.Flags().BoolVar(&vars.allowWkldDowngrade, allowDowngradeFlag, false, allowDowngradeFlagDescription)
 
 	cmd.SetUsageTemplate(template.Usage)
 	cmd.Annotations = map[string]string{

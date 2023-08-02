@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -296,8 +297,10 @@ func TestBuildArgs_UnmarshalYAML(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			b := Image{
-				Build: BuildArgsOrString{
-					BuildString: aws.String("./default"),
+				ImageLocationOrBuild: ImageLocationOrBuild{
+					Build: BuildArgsOrString{
+						BuildString: aws.String("./default"),
+					},
 				},
 			}
 			err := yaml.Unmarshal(tc.inContent, &b)
@@ -349,6 +352,86 @@ func TestPlatformArgsOrString_UnmarshalYAML(t *testing.T) {
 				require.Equal(t, tc.wantedStruct.PlatformString, p.Platform.PlatformString)
 				require.Equal(t, tc.wantedStruct.PlatformArgs.OSFamily, p.Platform.PlatformArgs.OSFamily)
 				require.Equal(t, tc.wantedStruct.PlatformArgs.Arch, p.Platform.PlatformArgs.Arch)
+			}
+		})
+	}
+}
+
+func TestServiceConnectBoolOrArgs_ServiceConnectEnabled(t *testing.T) {
+	testCases := map[string]struct {
+		mft *ServiceConnectBoolOrArgs
+
+		wanted bool
+	}{
+		"disabled by default": {
+			mft:    &ServiceConnectBoolOrArgs{},
+			wanted: false,
+		},
+		"set by bool": {
+			mft: &ServiceConnectBoolOrArgs{
+				EnableServiceConnect: aws.Bool(true),
+			},
+			wanted: true,
+		},
+		"set by args": {
+			mft: &ServiceConnectBoolOrArgs{
+				ServiceConnectArgs: ServiceConnectArgs{
+					Alias: aws.String("api"),
+				},
+			},
+			wanted: true,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			// WHEN
+			enabled := tc.mft.Enabled()
+
+			// THEN
+			require.Equal(t, tc.wanted, enabled)
+		})
+	}
+}
+
+func TestServiceConnect_UnmarshalYAML(t *testing.T) {
+	testCases := map[string]struct {
+		inContent []byte
+
+		wantedStruct ServiceConnectBoolOrArgs
+		wantedError  error
+	}{
+		"returns error if both bool and args specified": {
+			inContent: []byte(`connect: true
+  alias: api`),
+
+			wantedError: errors.New("yaml: line 2: mapping values are not allowed in this context"),
+		},
+		"error if unmarshalable": {
+			inContent: []byte(`connect:
+  ohess: linus
+  archie: leg64`),
+			wantedError: errUnmarshalServiceConnectOpts,
+		},
+		"success": {
+			inContent: []byte(`connect:
+  alias: api`),
+			wantedStruct: ServiceConnectBoolOrArgs{
+				ServiceConnectArgs: ServiceConnectArgs{
+					Alias: aws.String("api"),
+				},
+			},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			v := NetworkConfig{}
+			err := yaml.Unmarshal(tc.inContent, &v)
+			if tc.wantedError != nil {
+				require.EqualError(t, err, tc.wantedError.Error())
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.wantedStruct, v.Connect)
 			}
 		})
 	}
@@ -466,7 +549,7 @@ func TestPlatformArgsOrString_OS(t *testing.T) {
 			},
 			wanted: "linux",
 		},
-		"should return OS when platform is a map": {
+		"should return OS when platform is a map 2019 core": {
 			in: &PlatformArgsOrString{
 				PlatformArgs: PlatformArgs{
 					OSFamily: aws.String("windows_server_2019_core"),
@@ -475,7 +558,7 @@ func TestPlatformArgsOrString_OS(t *testing.T) {
 			},
 			wanted: "windows_server_2019_core",
 		},
-		"should return lowercase OS": {
+		"should return lowercase OS 2019 core": {
 			in: &PlatformArgsOrString{
 				PlatformArgs: PlatformArgs{
 					OSFamily: aws.String("wINdows_sERver_2019_cORe"),
@@ -483,6 +566,60 @@ func TestPlatformArgsOrString_OS(t *testing.T) {
 				},
 			},
 			wanted: "windows_server_2019_core",
+		},
+		"should return OS when platform is a map 2019 full": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("windows_server_2019_full"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "windows_server_2019_full",
+		},
+		"should return lowercase OS 2019 full": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("wINdows_sERver_2019_fUll"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "windows_server_2019_full",
+		},
+		"should return OS when platform is a map 2022 core": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("windows_server_2022_core"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "windows_server_2022_core",
+		},
+		"should return lowercase OS 2022 core": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("wINdows_sERver_2022_cORe"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "windows_server_2022_core",
+		},
+		"should return OS when platform is a map 2022 full": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("windows_server_2022_full"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "windows_server_2022_full",
+		},
+		"should return lowercase OS 2022 full": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("wINdows_sERver_2022_fUll"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "windows_server_2022_full",
 		},
 	}
 	for name, tc := range testCases {
@@ -503,10 +640,37 @@ func TestPlatformArgsOrString_Arch(t *testing.T) {
 			},
 			wanted: "arm",
 		},
-		"should return arch when platform is a map": {
+		"should return arch when platform is a map 2019 core": {
 			in: &PlatformArgsOrString{
 				PlatformArgs: PlatformArgs{
 					OSFamily: aws.String("windows_server_2019_core"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "x86_64",
+		},
+		"should return arch when platform is a map 2019 full": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("windows_server_2019_full"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "x86_64",
+		},
+		"should return arch when platform is a map 2022 core": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("windows_server_2022_core"),
+					Arch:     aws.String("x86_64"),
+				},
+			},
+			wanted: "x86_64",
+		},
+		"should return arch when platform is a map 2022 full": {
+			in: &PlatformArgsOrString{
+				PlatformArgs: PlatformArgs{
+					OSFamily: aws.String("windows_server_2022_full"),
 					Arch:     aws.String("x86_64"),
 				},
 			},
@@ -539,7 +703,7 @@ func TestRedirectPlatform(t *testing.T) {
 		"returns nil if default platform": {
 			inOS:           "linux",
 			inArch:         "amd64",
-			inWorkloadType: LoadBalancedWebServiceType,
+			inWorkloadType: manifestinfo.LoadBalancedWebServiceType,
 
 			wantedPlatform: "",
 			wantedError:    nil,
@@ -547,7 +711,7 @@ func TestRedirectPlatform(t *testing.T) {
 		"returns error if App Runner + Windows": {
 			inOS:           "windows",
 			inArch:         "amd64",
-			inWorkloadType: RequestDrivenWebServiceType,
+			inWorkloadType: manifestinfo.RequestDrivenWebServiceType,
 
 			wantedPlatform: "",
 			wantedError:    errors.New("Windows is not supported for App Runner services"),
@@ -677,7 +841,9 @@ func TestBuildConfig(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			s := Image{
-				Build: tc.inBuild,
+				ImageLocationOrBuild: ImageLocationOrBuild{
+					Build: tc.inBuild,
+				},
 			}
 			got := s.BuildConfig(mockWsRoot)
 
@@ -699,7 +865,11 @@ func TestNetworkConfig_IsEmpty(t *testing.T) {
 			in: NetworkConfig{
 				VPC: vpcConfig{
 					SecurityGroups: SecurityGroupsIDsOrConfig{
-						IDs: []string{"group"},
+						IDs: []stringOrFromCFN{
+							{
+								Plain: aws.String("group"),
+							},
+						},
 					},
 				},
 			},
@@ -719,7 +889,7 @@ func TestNetworkConfig_IsEmpty(t *testing.T) {
 func TestSecurityGroupsConfig_GetIDs(t *testing.T) {
 	testCases := map[string]struct {
 		in     SecurityGroupsIDsOrConfig
-		wanted []string
+		wanted []stringOrFromCFN
 	}{
 		"nil returned when no security groups are specified": {
 			in:     SecurityGroupsIDsOrConfig{},
@@ -728,24 +898,66 @@ func TestSecurityGroupsConfig_GetIDs(t *testing.T) {
 		"security groups in map are returned": {
 			in: SecurityGroupsIDsOrConfig{
 				AdvancedConfig: SecurityGroupsConfig{
-					SecurityGroups: []string{"group", "group1"},
+					SecurityGroups: []stringOrFromCFN{
+						{
+							Plain: aws.String("group"),
+						},
+						{
+							Plain: aws.String("group1"),
+						},
+						{
+							FromCFN: fromCFN{
+								Name: aws.String("sg-001"),
+							},
+						},
+					},
 				},
 			},
-			wanted: []string{"group", "group1"},
+			wanted: []stringOrFromCFN{
+				{
+					Plain: aws.String("group"),
+				},
+				{
+					Plain: aws.String("group1"),
+				},
+				{
+					FromCFN: fromCFN{
+						Name: aws.String("sg-001"),
+					},
+				},
+			},
 		},
 		"nil returned when security groups in map are empty": {
 			in: SecurityGroupsIDsOrConfig{
 				AdvancedConfig: SecurityGroupsConfig{
-					SecurityGroups: []string{},
+					SecurityGroups: []stringOrFromCFN{},
 				},
 			},
 			wanted: nil,
 		},
 		"security groups in array are returned": {
 			in: SecurityGroupsIDsOrConfig{
-				IDs: []string{"123", "45"},
+				IDs: []stringOrFromCFN{
+					{
+						Plain: aws.String("123"),
+					},
+					{
+						Plain: aws.String("45"),
+					},
+					{
+						FromCFN: fromCFN{
+							Name: aws.String("sg-001"),
+						},
+					},
+				},
 			},
-			wanted: []string{"123", "45"},
+			wanted: []stringOrFromCFN{
+				{Plain: aws.String("123")},
+				{Plain: aws.String("45")},
+				{FromCFN: fromCFN{
+					Name: aws.String("sg-001"),
+				}},
+			},
 		},
 	}
 
@@ -771,7 +983,11 @@ func TestSecurityGroupsConfig_IsDefaultSecurityGroupDenied(t *testing.T) {
 		"default security group is applied when deny_default is not specified in SG config": {
 			in: SecurityGroupsIDsOrConfig{
 				AdvancedConfig: SecurityGroupsConfig{
-					SecurityGroups: []string{"1"},
+					SecurityGroups: []stringOrFromCFN{
+						{
+							Plain: aws.String("1"),
+						},
+					},
 				},
 			},
 			wanted: false,
@@ -779,15 +995,23 @@ func TestSecurityGroupsConfig_IsDefaultSecurityGroupDenied(t *testing.T) {
 		"default security group is applied when deny_default is false in SG config": {
 			in: SecurityGroupsIDsOrConfig{
 				AdvancedConfig: SecurityGroupsConfig{
-					SecurityGroups: []string{"1"},
-					DenyDefault:    aws.Bool(false),
+					SecurityGroups: []stringOrFromCFN{
+						{
+							Plain: aws.String("1"),
+						},
+					},
+					DenyDefault: aws.Bool(false),
 				},
 			},
 			wanted: false,
 		},
 		"default security group is applied when security group array is specified": {
 			in: SecurityGroupsIDsOrConfig{
-				IDs: []string{"1"},
+				IDs: []stringOrFromCFN{
+					{
+						Plain: aws.String("1"),
+					},
+				},
 			},
 			wanted: false,
 		},
@@ -837,8 +1061,9 @@ network:
   vpc:
     placement: 'public'
     security_groups:
-    - 'sg-1234'
-    - 'sg-4567'
+      - 'sg-1234'
+      - 'sg-4567'
+      - from_cfn: 'dbsg-001'
 `,
 			wantedConfig: &NetworkConfig{
 				VPC: vpcConfig{
@@ -846,7 +1071,19 @@ network:
 						PlacementString: placementStringP(PublicSubnetPlacement),
 					},
 					SecurityGroups: SecurityGroupsIDsOrConfig{
-						IDs:            []string{"sg-1234", "sg-4567"},
+						IDs: []stringOrFromCFN{
+							{
+								Plain: aws.String("sg-1234"),
+							},
+							{
+								Plain: aws.String("sg-4567"),
+							},
+							{
+								FromCFN: fromCFN{
+									Name: aws.String("dbsg-001"),
+								},
+							},
+						},
 						AdvancedConfig: SecurityGroupsConfig{},
 					},
 				},
@@ -857,7 +1094,10 @@ network:
 network:
   vpc:
     security_groups:
-      groups: ['sg-1234', 'sg-4567']
+      groups: 
+        - 'sg-1234'
+        - 'sg-4567'
+        - from_cfn: 'dbsg-001'
       deny_default: true
 `,
 			wantedConfig: &NetworkConfig{
@@ -866,8 +1106,20 @@ network:
 					SecurityGroups: SecurityGroupsIDsOrConfig{
 						IDs: nil,
 						AdvancedConfig: SecurityGroupsConfig{
-							SecurityGroups: []string{"sg-1234", "sg-4567"},
-							DenyDefault:    &trueValue,
+							SecurityGroups: []stringOrFromCFN{
+								{
+									Plain: aws.String("sg-1234"),
+								},
+								{
+									Plain: aws.String("sg-4567"),
+								},
+								{
+									FromCFN: fromCFN{
+										Name: aws.String("dbsg-001"),
+									},
+								},
+							},
+							DenyDefault: &trueValue,
 						},
 					},
 				},
@@ -886,8 +1138,14 @@ network:
 					SecurityGroups: SecurityGroupsIDsOrConfig{
 						IDs: nil,
 						AdvancedConfig: SecurityGroupsConfig{
-							SecurityGroups: []string{"sg-1234", "sg-4567"},
-							DenyDefault:    nil,
+							SecurityGroups: []stringOrFromCFN{
+								{
+									Plain: aws.String("sg-1234"),
+								},
+								{
+									Plain: aws.String("sg-4567"),
+								},
+							},
 						},
 					},
 				},
@@ -992,6 +1250,52 @@ topics:
 				},
 			},
 		},
+		"Valid publish yaml with fifo topic enabled": {
+			inContent: `
+topics:
+  - name: tests
+    fifo: true
+`,
+			wantedPublish: PublishConfig{
+				Topics: []Topic{
+					{
+						Name: aws.String("tests"),
+						FIFO: FIFOTopicAdvanceConfigOrBool{
+							Enable: aws.Bool(true),
+						},
+					},
+				},
+			},
+		},
+		"Valid publish yaml with advanced fifo topic": {
+			inContent: `
+topics:
+  - name: tests
+    fifo:
+      content_based_deduplication: true
+`,
+			wantedPublish: PublishConfig{
+				Topics: []Topic{
+					{
+						Name: aws.String("tests"),
+						FIFO: FIFOTopicAdvanceConfigOrBool{
+							Advanced: FIFOTopicAdvanceConfig{
+								ContentBasedDeduplication: aws.Bool(true),
+							},
+						},
+					},
+				},
+			},
+		},
+		"Invalid publish yaml with advanced fifo topic": {
+			inContent: `
+topics:
+  - name: tests
+    fifo: apple
+`,
+			wantedErr: errors.New(`unable to unmarshal "fifo" field into boolean or compose-style map`),
+		},
+
 		"Error when unmarshalable": {
 			inContent: `
 topics: abc

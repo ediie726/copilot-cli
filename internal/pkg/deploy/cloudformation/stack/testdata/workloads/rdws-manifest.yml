@@ -31,10 +31,14 @@ command: "shine on you"
 publish:
   topics:
     - name: customers
+    - name: mytopic
+      fifo: true
 
 network:
   vpc:
     placement: private
+
+count: 'high-availability/3'
 
 # Optional fields for more advanced use-cases.
 #
@@ -50,6 +54,14 @@ environments:
     command: crazy diamond
     variables:
       LOG_LEVEL: debug        # Log level for the "test" environment.
+      DB_NAME:
+        from_cfn: test-UserDB
+    secrets:                      # Pass secrets from AWS Systems Manager (SSM) Parameter Store and Secrets Manager.
+      my-ssm-secret: "arn:aws:ssm:us-east-1:123456789123:parameter/jan11ssm"
+      MY_FROM_CFN_SECRET:
+        from_cfn: my-other-stack-exported-secret
+      MY_SECRETS_MANAGER_SECRET:
+        secretsmanager: mysecretsmanagername
   prod:
     network:
       vpc:

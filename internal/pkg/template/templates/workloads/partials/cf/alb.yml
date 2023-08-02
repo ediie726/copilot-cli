@@ -1,43 +1,51 @@
-TargetGroup:
+{{- range $i, $rule := .ALBListener.Rules}}
+TargetGroup{{ if ne $i 0 }}{{ $i }}{{ end }}:
   Metadata:
-    'aws:copilot:description': "A target group to connect the load balancer to your service"
+    'aws:copilot:description': "A target group to connect the load balancer to your service on port {{$rule.TargetPort}}"
   Type: AWS::ElasticLoadBalancingV2::TargetGroup
   Properties:
-    HealthCheckPath: {{.HTTPHealthCheck.HealthCheckPath}} # Default is '/'.
-    {{- if .HTTPHealthCheck.Port}}
-    HealthCheckPort: {{.HTTPHealthCheck.Port}} # Default is 'traffic-port'.
+    HealthCheckPath: {{$rule.HTTPHealthCheck.HealthCheckPath}} # Default is '/'.
+    {{- if $rule.HTTPHealthCheck.Port}}
+    HealthCheckPort: {{$rule.HTTPHealthCheck.Port}} # Default is 'traffic-port'.
     {{- end}}
-    {{- if .HTTPHealthCheck.SuccessCodes}}
+    {{- if $rule.HTTPHealthCheck.SuccessCodes}}
     Matcher:
-      HttpCode: {{.HTTPHealthCheck.SuccessCodes}}
+      HttpCode: {{$rule.HTTPHealthCheck.SuccessCodes}}
     {{- end}}
-    {{- if .HTTPHealthCheck.HealthyThreshold}}
-    HealthyThresholdCount: {{.HTTPHealthCheck.HealthyThreshold}}
+    {{- if $rule.HTTPHealthCheck.HealthyThreshold}}
+    HealthyThresholdCount: {{$rule.HTTPHealthCheck.HealthyThreshold}}
     {{- end}}
-    {{- if .HTTPHealthCheck.UnhealthyThreshold}}
-    UnhealthyThresholdCount: {{.HTTPHealthCheck.UnhealthyThreshold}}
+    {{- if $rule.HTTPHealthCheck.UnhealthyThreshold}}
+    UnhealthyThresholdCount: {{$rule.HTTPHealthCheck.UnhealthyThreshold}}
     {{- end}}
-    {{- if .HTTPHealthCheck.Interval}}
-    HealthCheckIntervalSeconds: {{.HTTPHealthCheck.Interval}}
+    {{- if $rule.HTTPHealthCheck.Interval}}
+    HealthCheckIntervalSeconds: {{$rule.HTTPHealthCheck.Interval}}
     {{- end}}
-    {{- if .HTTPHealthCheck.Timeout}}
-    HealthCheckTimeoutSeconds: {{.HTTPHealthCheck.Timeout}}
+    {{- if $rule.HTTPHealthCheck.Timeout}}
+    HealthCheckTimeoutSeconds: {{$rule.HTTPHealthCheck.Timeout}}
     {{- end}}
-    Port: !Ref ContainerPort
+    {{- if $rule.HealthCheckProtocol}}
+    HealthCheckProtocol: {{$rule.HealthCheckProtocol}}
+    {{- end}}
+    Port: {{$rule.TargetPort}}
+    {{- if eq $rule.TargetPort "443" }}
+    Protocol: HTTPS
+    {{- else }}
     Protocol: HTTP
-    {{- if .HTTPVersion}}
-    ProtocolVersion: {{.HTTPVersion}}
+    {{- end }}
+    {{- if $rule.HTTPVersion}}
+    ProtocolVersion: {{$rule.HTTPVersion}}
     {{- end}}
     TargetGroupAttributes:
       - Key: deregistration_delay.timeout_seconds
-        Value: {{.DeregistrationDelay}} # ECS Default is 300; Copilot default is 60.
+        Value: {{$rule.DeregistrationDelay}} # ECS Default is 300; Copilot default is 60.
       - Key: stickiness.enabled
-        Value: !Ref Stickiness
+        Value: {{$rule.Stickiness}}
     TargetType: ip
     VpcId:
       Fn::ImportValue:
         !Sub "${AppName}-${EnvName}-VpcId"
-
+{{- end}}{{/* range $i, $rule := .ALBListener.Rules */}}
 RulePriorityFunction:
   Type: AWS::Lambda::Function
   Properties:
@@ -54,7 +62,7 @@ RulePriorityFunction:
 
 RulePriorityFunctionRole:
   Metadata:
-    'aws:copilot:description': "An IAM Role to describe load balancer rules for assigning a priority"
+    'aws:copilot:description': "An IAM Role {{- if .PermissionsBoundary}} with permissions boundary {{.PermissionsBoundary}} {{- end}} to describe load balancer rules for assigning a priority"
   Type: AWS::IAM::Role
   Properties:
     AssumeRolePolicyDocument:
@@ -66,6 +74,9 @@ RulePriorityFunctionRole:
               - lambda.amazonaws.com
           Action:
             - sts:AssumeRole
+    {{- if .PermissionsBoundary}}
+    PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/{{.PermissionsBoundary}}'
+    {{- end}}
     Path: /
     ManagedPolicyArns:
       - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
@@ -79,7 +90,7 @@ RulePriorityFunctionRole:
                 - elasticloadbalancing:DescribeRules
               Resource: "*"
 
-{{- if .HTTPSListener}}
+{{- if .ALBListener.IsHTTPS}}
 {{include "https-listener" .}}
 {{- else}}
 {{include "http-listener" .}}

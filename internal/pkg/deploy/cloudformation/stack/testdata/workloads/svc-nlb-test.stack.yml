@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a load balanced web service on Amazon ECS.
+Metadata:
+  Version: v1.29.0
 Parameters:
   AppName:
     Type: String
@@ -32,16 +34,17 @@ Parameters:
     Description: 'URL of the environment file.'
     Type: String
     Default: ""
-  TargetContainer:
-    Type: String
-  TargetPort:
-    Type: Number
   NLBAliases:
     Type: String
     Default: ""
   NLBPort:
     Type: String
+  TargetContainer:
+    Type: String
+  TargetPort:
+    Type: Number
 Conditions:
+  IsGovCloud: !Equals [!Ref "AWS::Partition", "aws-us-gov"]
   HasAssociatedDomain: !Equals [!Ref DNSDelegated, true]
   HasAddons: !Not [!Equals [!Ref AddonsTemplateURL, ""]]
   HasEnvFile: !Not [!Equals [!Ref EnvFileARN, ""]]
@@ -94,8 +97,12 @@ Resources: # If a bucket URL is specified, that means the template exists.
               awslogs-group: !Ref LogGroup
               awslogs-stream-prefix: copilot
           PortMappings:
-            - ContainerPort: !Ref ContainerPort
+            - ContainerPort: 80
+              Name: target
+              Protocol: tcp
             - ContainerPort: 443
+              Protocol: tcp
+            - ContainerPort: 8081
               Protocol: tcp
   ExecutionRole:
     Metadata:
@@ -219,12 +226,10 @@ Resources: # If a bucket URL is specified, that means the template exists.
       Workload: !Ref WorkloadName
       EnvStack: !Sub '${AppName}-${EnvName}'
       Parameters: [Aliases]
+      EnvVersion: v1.42.0
   EnvControllerFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Code:
-        S3Bucket:
-        S3Key:
       Handler: "index.handler"
       Timeout: 900
       MemorySize: 512
@@ -279,6 +284,7 @@ Resources: # If a bucket URL is specified, that means the template exists.
     Type: AWS::ECS::Service
     DependsOn:
       - NLBListener
+      - NLBListener1
     Properties:
       PlatformVersion: LATEST
       Cluster:
@@ -291,8 +297,31 @@ Resources: # If a bucket URL is specified, that means the template exists.
           Rollback: true
         MinimumHealthyPercent: 100
         MaximumPercent: 200
+        Alarms:
+          !If
+          - IsGovCloud
+          - !Ref AWS::NoValue
+          - Enable: false
+            AlarmNames: []
+            Rollback: true
       PropagateTags: SERVICE
       LaunchType: FARGATE
+      ServiceConnectConfiguration:
+        Enabled: True
+        Namespace: test.my-app.local
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region: !Ref AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix: copilot
+        Services:
+          - PortName: target
+            # Avoid using the same service with Service Discovery in a namespace.
+            DiscoveryName: !Join ["-", [!Ref WorkloadName, "sc"]]
+            ClientAliases:
+              - Port: !Ref TargetPort
+                DnsName: !Ref WorkloadName
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
@@ -309,9 +338,12 @@ Resources: # If a bucket URL is specified, that means the template exists.
         - ContainerName: fe
           ContainerPort: 443
           TargetGroupArn: !Ref NLBTargetGroup
+        - ContainerName: fe
+          ContainerPort: 8081
+          TargetGroupArn: !Ref NLBTargetGroup1
       ServiceRegistries:
         - RegistryArn: !GetAtt DiscoveryService.Arn
-          Port: !Ref ContainerPort
+          Port: !Ref TargetPort
   PublicNetworkLoadBalancer:
     Metadata:
       'aws:copilot:description': 'A Network Load Balancer to distribute public traffic to your service'
@@ -324,24 +356,50 @@ Resources: # If a bucket URL is specified, that means the template exists.
           - Fn::ImportValue: !Sub '${AppName}-${EnvName}-PublicSubnets'
       Type: network
   NLBListener:
+    Metadata:
+      'aws:copilot:description': 'A TLS listener on port `443` that forwards traffic to your tasks'
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       DefaultActions:
         - TargetGroupArn: !Ref NLBTargetGroup
           Type: forward
       LoadBalancerArn: !Ref PublicNetworkLoadBalancer
-      Port: !Ref NLBPort
+      Port: 443
       Protocol: TLS
       Certificates:
         - CertificateArn: !Ref NLBCertValidatorAction
       SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+  NLBListener1:
+    Metadata:
+      'aws:copilot:description': 'A TCP listener on port `8081` that forwards traffic to your tasks'
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref NLBTargetGroup1
+          Type: forward
+      LoadBalancerArn: !Ref PublicNetworkLoadBalancer
+      Port: 8081
+      Protocol: TCP
   NLBTargetGroup:
     Metadata:
-      'aws:copilot:description': 'A target group to connect the network load balancer to your service'
+      'aws:copilot:description': 'A target group to connect the network load balancer to your service on port 443'
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckPort: 80
       Port: 443
+      Protocol: TCP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # ECS Default is 300; Copilot default is 60.
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub "${AppName}-${EnvName}-VpcId"
+  NLBTargetGroup1:
+    Metadata:
+      'aws:copilot:description': 'A target group to connect the network load balancer to your service on port 8081'
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 8081
       Protocol: TCP
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
@@ -366,6 +424,11 @@ Resources: # If a bucket URL is specified, that means the template exists.
           FromPort: 80
           ToPort: 80
           IpProtocol: TCP
+        - CidrIp: 10.0.0.0/24
+          Description: Ingress to allow access from Network Load Balancer subnet
+          FromPort: 8081
+          IpProtocol: TCP
+          ToPort: 8081
         - CidrIp: 10.1.0.0/24
           Description: Ingress to allow access from Network Load Balancer subnet
           FromPort: 443
@@ -375,6 +438,11 @@ Resources: # If a bucket URL is specified, that means the template exists.
           Description: Ingress to allow access from Network Load Balancer subnet for health check
           FromPort: 80
           ToPort: 80
+          IpProtocol: TCP
+        - CidrIp: 10.1.0.0/24
+          Description: Ingress to allow access from Network Load Balancer subnet
+          FromPort: 8081
+          ToPort: 8081
           IpProtocol: TCP
       Tags:
         - Key: Name
@@ -420,9 +488,6 @@ Resources: # If a bucket URL is specified, that means the template exists.
     Type: AWS::Lambda::Function
     Condition: HasAssociatedDomain
     Properties:
-      Code:
-        S3Bucket:
-        S3Key:
       Handler: "index.handler"
       Timeout: 900
       MemorySize: 512

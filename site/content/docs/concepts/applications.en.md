@@ -1,4 +1,4 @@
-An application is a group of related services, environments, and pipelines. Whether you have one service that does everything or a constellation of micro-services, Copilot organizes them and the environments they're deployed to into an "application".
+An application is a group of related services, environments, and pipelines. Whether you have one service that does everything or a constellation of micro-services, Copilot organizes the service(s), and the environments into which they can be deployed, into an "application."
 
 Let's walk through an example. We want to build a voting app which needs to collect votes and aggregate the results.
 
@@ -10,7 +10,10 @@ Your application configuration (which services and environments belong to it) is
 
 ## Creating an App
 
-To set up an application, you can just run `copilot init`. You'll be asked if you want to set up an app or choose an use app.
+!!! Attention
+    If you have an existing `copilot/` directory that you created for other purposes, you may find Copilot creating files in that directory. If this happens, you can make an empty directory also named `copilot/` closer to your working directory. Copilot will use this empty directory instead.
+
+To set up an application, you can just run `copilot init`. You'll be asked if you want to set up an app or choose an existing app.
 
 ```bash
 copilot init
@@ -27,11 +30,13 @@ You can also provide more granular configuration for your application by running
 
 * Tag all application, service and environment resources with an additional set of [aws resource tags](https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html)
 * Use a custom domain name for Load Balanced services
+* Pass in an existing IAM policy with which to set a permissions boundary for all roles created within the application.
 
 ```bash
-$ copilot app init                             \
-  --domain my-awesome-app.aws                  \
-  --resource-tags department=MyDept,team=MyTeam
+$ copilot app init                                \
+  --domain my-awesome-app.aws                     \
+  --resource-tags department=MyDept,team=MyTeam   \
+  --permissions-boundary my-pb-policy
 ```
 
 ## App Infrastructure
@@ -72,21 +77,29 @@ ecs-kudos
 
 Running `copilot app show` will show you a summary of your application, including all the services and environments in your app.
 
-```bash
+```console
 $ copilot app show
 About
 
   Name              vote
+  Version           v1.1.0 
   URI               vote-app.aws
 
 Environments
 
   Name              AccountID           Region
+  ----              ---------           ------
   test              000000000000        us-east-1
 
-Services
+Workloads
 
-  Name              Type
-  collector         Load Balanced Web Service
-  aggregator        Backend Service
+  Name              Type                        Environments
+  ----              ----                        ------------
+  collector         Load Balanced Web Service   prod
+  aggregator        Backend Service             test, prod
+
+Pipelines
+
+  Name
+  ----
 ```

@@ -14,7 +14,7 @@ import (
 
 	"github.com/aws/copilot-cli/e2e/internal/client"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -73,7 +73,7 @@ var _ = Describe("pipeline flow", func() {
 			_, err := copilot.EnvInit(&client.EnvInitRequest{
 				AppName: appName,
 				EnvName: "test",
-				Profile: "e2etestenv",
+				Profile: "test",
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -81,7 +81,7 @@ var _ = Describe("pipeline flow", func() {
 			_, err := copilot.EnvInit(&client.EnvInitRequest{
 				AppName: appName,
 				EnvName: "prod",
-				Profile: "e2eprodenv",
+				Profile: "prod",
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})

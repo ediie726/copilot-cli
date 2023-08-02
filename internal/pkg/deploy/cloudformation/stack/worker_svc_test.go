@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/aws/copilot-cli/internal/pkg/addon"
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
@@ -67,7 +68,7 @@ Outputs:
     Value: hello`,
 				}
 			},
-			wantedErr: fmt.Errorf("convert the sidecar configuration for service frontend: %w", errors.New("cannot parse port mapping from 80/80/80")),
+			wantedErr: fmt.Errorf("parse exposed ports in service manifest frontend: cannot parse port mapping from 80/80/80"),
 		},
 		"failed parsing Auto Scaling template": {
 			setUpManifest: func(svc *WorkerService) {
@@ -137,9 +138,14 @@ Outputs:
 					StringSlice: []string{"here"},
 				}
 				svc.manifest.ExecuteCommand = manifest.ExecuteCommand{Enable: aws.Bool(true)}
-				svc.manifest.DeployConfig = manifest.DeploymentConfiguration{
-					Rolling: aws.String("default"),
-				}
+				svc.manifest.DeployConfig = manifest.WorkerDeploymentConfig{
+					DeploymentControllerConfig: manifest.DeploymentControllerConfig{
+						Rolling: aws.String("default"),
+					},
+					WorkerRollbackAlarms: manifest.AdvancedToUnion[[]string, manifest.WorkerAlarmArgs](
+						manifest.WorkerAlarmArgs{
+							MessagesDelayed: aws.Int(10),
+						})}
 			},
 			mockDependencies: func(t *testing.T, ctrl *gomock.Controller, svc *WorkerService) {
 				m := mocks.NewMockworkerSvcReadParser(ctrl)
@@ -148,7 +154,7 @@ Outputs:
 						AppName:      "phonetool",
 						EnvName:      "test",
 						WorkloadName: "frontend",
-						WorkloadType: manifest.WorkerServiceType,
+						WorkloadType: manifestinfo.WorkerServiceType,
 						HealthCheck: &template.ContainerHealthCheck{
 							Command:     []string{"CMD-SHELL", "curl -f http://localhost/ || exit 1"},
 							Interval:    aws.Int64(5),
@@ -165,11 +171,12 @@ Outputs:
 						Network: template.NetworkOpts{
 							AssignPublicIP: template.DisablePublicIP,
 							SubnetsType:    template.PrivateSubnetsPlacement,
-							SecurityGroups: []string{"sg-1234"},
+							SecurityGroups: []template.SecurityGroup{},
 						},
 						DeploymentConfiguration: template.DeploymentConfigurationOpts{
 							MinHealthyPercent: 100,
 							MaxPercent:        200,
+							Rollback:          template.RollingUpdateRollbackConfig{MessagesDelayed: aws.Int(10)},
 						},
 						EntryPoint: []string{"enter", "from"},
 						Command:    []string{"here"},
@@ -203,9 +210,11 @@ Outputs:
 						env:  testEnvName,
 						app:  testAppName,
 						rc: RuntimeConfig{
-							Image: &ECRImage{
-								RepoURL:  testImageRepoURL,
-								ImageTag: testImageTag,
+							PushedImages: map[string]ECRImage{
+								testServiceName: {
+									RepoURL:  testImageRepoURL,
+									ImageTag: testImageTag,
+								},
 							},
 							AccountID: "0123456789012",
 							Region:    "us-west-2",
@@ -220,9 +229,7 @@ Outputs:
 				conf.manifest.Network.VPC.Placement = manifest.PlacementArgOrString{
 					PlacementString: &testPrivatePlacement,
 				}
-				conf.manifest.Network.VPC.SecurityGroups = manifest.SecurityGroupsIDsOrConfig{
-					IDs: []string{"sg-1234"},
-				}
+				conf.manifest.Network.VPC.SecurityGroups = manifest.SecurityGroupsIDsOrConfig{}
 			}
 
 			tc.mockDependencies(t, ctrl, conf)
@@ -263,7 +270,9 @@ func TestWorkerService_Parameters(t *testing.T) {
 				env:  testEnvName,
 				app:  testAppName,
 				image: manifest.Image{
-					Location: aws.String("mockLocation"),
+					ImageLocationOrBuild: manifest.ImageLocationOrBuild{
+						Location: aws.String("mockLocation"),
+					},
 				},
 			},
 			tc: testWorkerSvcManifest.WorkerServiceConfig.TaskConfig,

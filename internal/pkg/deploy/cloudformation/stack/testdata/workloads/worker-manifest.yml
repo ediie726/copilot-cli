@@ -20,9 +20,23 @@ count:
     msg_processing_time: 1s
 exec: true     # Enable running commands in your container.
 
+deployment:
+  rollback_alarms:
+    cpu_utilization: 70
+    memory_utilization: 50
+    messages_delayed: 5
+
 publish:
   topics:
     - name: givesOtherdogs
+    - name: mytopic
+      fifo: true
+    - name: mytopic
+    - name: yourtopic
+      fifo:
+        content_based_deduplication: true
+    - name: nonfifotopic
+      fifo: false
 
 subscribe:
   queue:
@@ -49,6 +63,20 @@ subscribe:
       service: dogsvc
       queue:
         timeout: 1s
+    - name: mytopic
+      service: mytopic
+      queue:
+        fifo: true
+    - name: yourtopic
+      service: yourtopic
+      queue:
+        fifo:
+          content_based_deduplication: true
+          high_throughput: true
+    - name: nonfifotopic
+      service: nonfifotopic
+      queue:
+        fifo: false
 
 # Optional fields for more advanced use-cases.
 #
@@ -63,4 +91,6 @@ environments:
   test:
     image:
       location: amazon/ecs-example
+    network:
+      connect: true
 

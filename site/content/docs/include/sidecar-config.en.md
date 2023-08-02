@@ -2,8 +2,10 @@
 <a id="port" href="#port" class="field">`port`</a> <span class="type">Integer</span>  
 Port of the container to expose (optional).
 
-<a id="image" href="#image" class="field">`image`</a> <span class="type">String</span>  
+<a id="image" href="#image" class="field">`image`</a> <span class="type">String or Map</span>  
 Image URL for the sidecar container (required).
+
+{% include 'image-config.en.md' %}
 
 <a id="essential" href="#essential" class="field">`essential`</a> <span class="type">Bool</span>  
 Whether the sidecar container is an essential container (optional, default true).
@@ -16,6 +18,10 @@ Environment variables for the sidecar container (optional)
 
 <a id="secrets" href="#secrets" class="field">`secrets`</a> <span class="type">Map</span>  
 Secrets to expose to the sidecar container (optional)
+
+<a id="envFile" href="#envFile" class="field">`env_file`</a> <span class="type">String</span>  
+The path to a file from the root of your workspace containing the environment variables to pass to the sidecar container. For more information about the environment variable file, see [Considerations for specifying environment variable files](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/taskdef-envfiles.html#taskdef-envfiles-considerations).
+
 
 <a id="mount-points" href="#mount-points" class="field">`mount_points`</a> <span class="type">Array of Maps</span>  
 Mount paths for EFS volumes specified at the service level (optional).

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/copilot-cli/internal/pkg/deploy/upload/customresource"
+
 	"github.com/aws/copilot-cli/internal/pkg/aws/partitions"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/template/override"
@@ -27,6 +29,12 @@ import (
 const (
 	enabled  = "ENABLED"
 	disabled = "DISABLED"
+)
+
+// SQS Queue field values.
+const (
+	sqsDedupeScopeMessageGroup              = "messageGroup"
+	sqsFIFOThroughputLimitPerMessageGroupId = "perMessageGroupId"
 )
 
 // Default values for EFS options
@@ -60,8 +68,21 @@ var (
 	}
 )
 
-// convertSidecar converts the manifest sidecar configuration into a format parsable by the templates pkg.
-func convertSidecar(s map[string]*manifest.SidecarConfig) ([]*template.SidecarOpts, error) {
+func convertPortMappings(exposedPorts []manifest.ExposedPort) []*template.PortMapping {
+	portMapping := make([]*template.PortMapping, len(exposedPorts))
+	for idx, exposedPort := range exposedPorts {
+		portMapping[idx] = &template.PortMapping{
+			ContainerPort: exposedPort.Port,
+			Protocol:      exposedPort.Protocol,
+			ContainerName: exposedPort.ContainerName,
+		}
+	}
+	return portMapping
+}
+
+// convertSidecars converts the manifest sidecar configuration into a format parsable by the templates pkg.
+func convertSidecars(s map[string]*manifest.SidecarConfig, exposedPorts map[string][]manifest.ExposedPort, rc RuntimeConfig) ([]*template.SidecarOpts, error) {
+	var sidecars []*template.SidecarOpts
 	if s == nil {
 		return nil, nil
 	}
@@ -72,13 +93,11 @@ func convertSidecar(s map[string]*manifest.SidecarConfig) ([]*template.SidecarOp
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-
-	var sidecars []*template.SidecarOpts
 	for _, name := range keys {
 		config := s[name]
-		port, protocol, err := manifest.ParsePortMapping(config.Port)
-		if err != nil {
-			return nil, err
+		imageURI := rc.PushedImages[name].URI()
+		if uri, hasLocation := config.ImageURI(); hasLocation {
+			imageURI = uri
 		}
 		entrypoint, err := convertEntryPoint(config.EntryPoint)
 		if err != nil {
@@ -90,14 +109,12 @@ func convertSidecar(s map[string]*manifest.SidecarConfig) ([]*template.SidecarOp
 		}
 		mp := convertSidecarMountPoints(config.MountPoints)
 		sidecars = append(sidecars, &template.SidecarOpts{
-			Name:       aws.String(name),
-			Image:      config.Image,
+			Name:       name,
+			Image:      aws.String(imageURI),
 			Essential:  config.Essential,
-			Port:       port,
-			Protocol:   protocol,
 			CredsParam: config.CredsParam,
 			Secrets:    convertSecrets(config.Secrets),
-			Variables:  config.Variables,
+			Variables:  convertEnvVars(config.Variables),
 			Storage: template.SidecarStorageOpts{
 				MountPoints: mp,
 			},
@@ -106,6 +123,7 @@ func convertSidecar(s map[string]*manifest.SidecarConfig) ([]*template.SidecarOp
 			EntryPoint:   entrypoint,
 			HealthCheck:  convertContainerHealthCheck(config.HealthCheck),
 			Command:      command,
+			PortMappings: convertPortMappings(exposedPorts[name]),
 		})
 	}
 	return sidecars, nil
@@ -126,16 +144,21 @@ func convertContainerHealthCheck(hc manifest.ContainerHealthCheck) *template.Con
 	}
 }
 
-func convertHostedZone(m manifest.RoutingRuleConfiguration) (template.AliasesForHostedZone, error) {
+func convertHostedZone(alias manifest.Alias, defaultHostedZone *string) (template.AliasesForHostedZone, error) {
 	aliasesFor := make(map[string][]string)
-	defaultHostedZone := m.HostedZone
-	if len(m.Alias.AdvancedAliases) != 0 {
-		for _, alias := range m.Alias.AdvancedAliases {
+	if len(alias.AdvancedAliases) != 0 {
+		for _, alias := range alias.AdvancedAliases {
 			if alias.HostedZone != nil {
+				if isDuplicateAliasEntry(aliasesFor[*alias.HostedZone], aws.StringValue(alias.Alias)) {
+					continue
+				}
 				aliasesFor[*alias.HostedZone] = append(aliasesFor[*alias.HostedZone], *alias.Alias)
 				continue
 			}
 			if defaultHostedZone != nil {
+				if isDuplicateAliasEntry(aliasesFor[*defaultHostedZone], aws.StringValue(alias.Alias)) {
+					continue
+				}
 				aliasesFor[*defaultHostedZone] = append(aliasesFor[*defaultHostedZone], *alias.Alias)
 			}
 		}
@@ -144,12 +167,28 @@ func convertHostedZone(m manifest.RoutingRuleConfiguration) (template.AliasesFor
 	if defaultHostedZone == nil {
 		return aliasesFor, nil
 	}
-	aliases, err := m.Alias.ToStringSlice()
+	aliases, err := alias.ToStringSlice()
 	if err != nil {
 		return nil, err
 	}
-	aliasesFor[*defaultHostedZone] = aliases
+
+	for _, alias := range aliases {
+		if isDuplicateAliasEntry(aliasesFor[*defaultHostedZone], alias) {
+			continue
+		}
+		aliasesFor[*defaultHostedZone] = append(aliasesFor[*defaultHostedZone], alias)
+	}
+
 	return aliasesFor, nil
+}
+
+func isDuplicateAliasEntry(aliasList []string, alias string) bool {
+	for _, entry := range aliasList {
+		if entry == alias {
+			return true
+		}
+	}
+	return false
 }
 
 // convertDependsOn converts image and sidecar depends on fields to have upper case statuses.
@@ -192,18 +231,21 @@ func convertCapacityProviders(a manifest.AdvancedCount) []*template.CapacityProv
 		CapacityProvider: capacityProviderFargateSpot,
 	})
 	rc := a.Range.RangeConfig
-	// Return if only spot is specifed as count
+	// Return if only spot is specified as count
 	if rc.SpotFrom == nil {
 		return cps
 	}
 	// Scaling with spot
 	spotFrom := aws.IntValue(rc.SpotFrom)
 	min := aws.IntValue(rc.Min)
-	// If spotFrom value is not equal to the autoscaling min, then
-	// the base value on the Fargate Capacity provider must be set
+	// If spotFrom value is greater than or equal to the autoscaling min,
+	// then the base value on the Fargate capacity provider must be set
 	// to one less than spotFrom
-	if spotFrom > min {
+	if spotFrom >= min {
 		base := spotFrom - 1
+		if base < 0 {
+			base = 0
+		}
 		fgCapacity := &template.CapacityProviderStrategy{
 			Base:             aws.Int(base),
 			Weight:           aws.Int(0),
@@ -319,31 +361,58 @@ func convertAutoscaling(a manifest.AdvancedCount) (*template.AutoscalingOpts, er
 func convertHTTPHealthCheck(hc *manifest.HealthCheckArgsOrString) template.HTTPHealthCheckOpts {
 	opts := template.HTTPHealthCheckOpts{
 		HealthCheckPath:    manifest.DefaultHealthCheckPath,
-		HealthyThreshold:   hc.HealthCheckArgs.HealthyThreshold,
-		UnhealthyThreshold: hc.HealthCheckArgs.UnhealthyThreshold,
-		GracePeriod:        aws.Int64(manifest.DefaultHealthCheckGracePeriod),
+		GracePeriod:        manifest.DefaultHealthCheckGracePeriod,
+		HealthyThreshold:   hc.Advanced.HealthyThreshold,
+		UnhealthyThreshold: hc.Advanced.UnhealthyThreshold,
+		SuccessCodes:       aws.StringValue(hc.Advanced.SuccessCodes),
 	}
-	if hc.HealthCheckArgs.Path != nil {
-		opts.HealthCheckPath = *hc.HealthCheckArgs.Path
-	} else if hc.HealthCheckPath != nil {
-		opts.HealthCheckPath = *hc.HealthCheckPath
+
+	if hc.IsZero() {
+		return opts
 	}
-	if hc.HealthCheckArgs.Port != nil {
-		opts.Port = strconv.Itoa(aws.IntValue(hc.HealthCheckArgs.Port))
+	if hc.IsBasic() {
+		opts.HealthCheckPath = convertPath(hc.Basic)
+		return opts
 	}
-	if hc.HealthCheckArgs.SuccessCodes != nil {
-		opts.SuccessCodes = *hc.HealthCheckArgs.SuccessCodes
+
+	if hc.Advanced.Path != nil {
+		opts.HealthCheckPath = convertPath(*hc.Advanced.Path)
 	}
-	if hc.HealthCheckArgs.Interval != nil {
-		opts.Interval = aws.Int64(int64(hc.HealthCheckArgs.Interval.Seconds()))
+	if hc.Advanced.Port != nil {
+		opts.Port = strconv.Itoa(aws.IntValue(hc.Advanced.Port))
 	}
-	if hc.HealthCheckArgs.Timeout != nil {
-		opts.Timeout = aws.Int64(int64(hc.HealthCheckArgs.Timeout.Seconds()))
+	if hc.Advanced.Interval != nil {
+		opts.Interval = aws.Int64(int64(hc.Advanced.Interval.Seconds()))
 	}
-	if hc.HealthCheckArgs.GracePeriod != nil {
-		opts.GracePeriod = aws.Int64(int64(hc.HealthCheckArgs.GracePeriod.Seconds()))
+	if hc.Advanced.Timeout != nil {
+		opts.Timeout = aws.Int64(int64(hc.Advanced.Timeout.Seconds()))
+	}
+	if hc.Advanced.GracePeriod != nil {
+		opts.GracePeriod = int64(hc.Advanced.GracePeriod.Seconds())
 	}
 	return opts
+}
+
+// convertNLBHealthCheck converts the NLB health check configuration into a format parsable by the templates pkg.
+func convertNLBHealthCheck(nlbHC *manifest.NLBHealthCheckArgs) template.NLBHealthCheck {
+	hc := template.NLBHealthCheck{
+		HealthyThreshold:   nlbHC.HealthyThreshold,
+		UnhealthyThreshold: nlbHC.UnhealthyThreshold,
+		GracePeriod:        aws.Int64(int64(manifest.DefaultHealthCheckGracePeriod)),
+	}
+	if nlbHC.Port != nil {
+		hc.Port = strconv.Itoa(aws.IntValue(nlbHC.Port))
+	}
+	if nlbHC.Timeout != nil {
+		hc.Timeout = aws.Int64(int64(nlbHC.Timeout.Seconds()))
+	}
+	if nlbHC.Interval != nil {
+		hc.Interval = aws.Int64(int64(nlbHC.Interval.Seconds()))
+	}
+	if nlbHC.GracePeriod != nil {
+		hc.GracePeriod = aws.Int64(int64(nlbHC.GracePeriod.Seconds()))
+	}
+	return hc
 }
 
 type networkLoadBalancerConfig struct {
@@ -354,20 +423,36 @@ type networkLoadBalancerConfig struct {
 	appDNSName           *string
 }
 
-func convertELBAccessLogsConfig(mft *manifest.Environment) (*template.ELBAccessLogs, error) {
+func convertELBAccessLogsConfig(mft *manifest.Environment) *template.ELBAccessLogs {
 	elbAccessLogsArgs, isELBAccessLogsSet := mft.ELBAccessLogs()
 	if !isELBAccessLogsSet {
-		return nil, nil
+		return nil
 	}
 
 	if elbAccessLogsArgs == nil {
-		return &template.ELBAccessLogs{}, nil
+		return &template.ELBAccessLogs{}
 	}
 
 	return &template.ELBAccessLogs{
 		BucketName: aws.StringValue(elbAccessLogsArgs.BucketName),
 		Prefix:     aws.StringValue(elbAccessLogsArgs.Prefix),
+	}
+}
+
+// convertFlowLogsConfig converts the VPC FlowLog configuration into a format parsable by the templates pkg.
+func convertFlowLogsConfig(mft *manifest.Environment) (*template.VPCFlowLogs, error) {
+	vpcFlowLogs := mft.EnvironmentConfig.Network.VPC.FlowLogs
+	if vpcFlowLogs.IsZero() {
+		return nil, nil
+	}
+	retentionInDays := aws.Int(14)
+	if vpcFlowLogs.Advanced.Retention != nil {
+		retentionInDays = vpcFlowLogs.Advanced.Retention
+	}
+	return &template.VPCFlowLogs{
+		Retention: retentionInDays,
 	}, nil
+
 }
 
 func convertEnvSecurityGroupCfg(mft *manifest.Environment) (*template.SecurityGroupConfig, error) {
@@ -403,41 +488,199 @@ func convertEnvSecurityGroupCfg(mft *manifest.Environment) (*template.SecurityGr
 	}, nil
 }
 
+func (s *LoadBalancedWebService) convertALBListener() (*template.ALBListener, error) {
+	rrConfig := s.manifest.HTTPOrBool
+	if rrConfig.Disabled() || rrConfig.IsEmpty() {
+		return nil, nil
+	}
+	var rules []template.ALBListenerRule
+	var aliasesFor template.AliasesForHostedZone
+	for _, routingRule := range rrConfig.RoutingRules() {
+		httpRedirect := true
+		if routingRule.RedirectToHTTPS != nil {
+			httpRedirect = aws.BoolValue(routingRule.RedirectToHTTPS)
+		}
+		rule, err := routingRuleConfigConverter{
+			rule:            routingRule,
+			manifest:        s.manifest,
+			httpsEnabled:    s.httpsEnabled,
+			redirectToHTTPS: httpRedirect,
+		}.convert()
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, *rule)
+		aliasesFor, err = convertHostedZone(rrConfig.Main.Alias, rrConfig.Main.HostedZone)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &template.ALBListener{
+		Rules:             rules,
+		IsHTTPS:           s.httpsEnabled,
+		HostedZoneAliases: aliasesFor,
+	}, nil
+}
+
+func (s *BackendService) convertALBListener() (*template.ALBListener, error) {
+	rrConfig := s.manifest.HTTP
+	if rrConfig.IsEmpty() {
+		return nil, nil
+	}
+	var rules []template.ALBListenerRule
+	var hostedZoneAliases template.AliasesForHostedZone
+	for _, routingRule := range rrConfig.RoutingRules() {
+		rule, err := routingRuleConfigConverter{
+			rule:            routingRule,
+			manifest:        s.manifest,
+			httpsEnabled:    s.httpsEnabled,
+			redirectToHTTPS: s.httpsEnabled,
+		}.convert()
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, *rule)
+		hostedZoneAliases, err = convertHostedZone(rrConfig.Main.Alias, rrConfig.Main.HostedZone)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &template.ALBListener{
+		Rules:             rules,
+		IsHTTPS:           s.httpsEnabled,
+		MainContainerPort: s.manifest.MainContainerPort(),
+		HostedZoneAliases: hostedZoneAliases,
+	}, nil
+}
+
+func (s *BackendService) convertGracePeriod() *int64 {
+	if s.manifest.HTTP.Main.HealthCheck.Advanced.GracePeriod != nil {
+		return aws.Int64(int64(s.manifest.HTTP.Main.HealthCheck.Advanced.GracePeriod.Seconds()))
+	}
+	return aws.Int64(int64(manifest.DefaultHealthCheckGracePeriod))
+}
+
+type loadBalancerTargeter interface {
+	MainContainerPort() string
+	ExposedPorts() (manifest.ExposedPortsIndex, error)
+}
+
+type routingRuleConfigConverter struct {
+	rule            manifest.RoutingRule
+	manifest        loadBalancerTargeter
+	httpsEnabled    bool
+	redirectToHTTPS bool
+}
+
+// convertPath attempts to standardize manifest paths on '/path' or '/' patterns.
+//   - If the path starts with a / (including '/'), return it unmodified.
+//   - Otherwise, prepend a leading '/' character.
+//
+// CFN health check and path patterns expect a leading '/', so we do that here instead of in the template.
+//
+// Empty strings, if they make it to this point, are converted to '/'.
+func convertPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if path[0] == '/' {
+		return path
+	}
+	return "/" + path
+}
+
+func (conv routingRuleConfigConverter) convert() (*template.ALBListenerRule, error) {
+	var aliases []string
+	var err error
+
+	exposedPorts, err := conv.manifest.ExposedPorts()
+	if err != nil {
+		return nil, err
+	}
+	targetContainer, targetPort, err := conv.rule.Target(exposedPorts)
+	if err != nil {
+		return nil, err
+	}
+
+	if conv.httpsEnabled {
+		aliases, err = convertAlias(conv.rule.Alias)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	config := &template.ALBListenerRule{
+		Path:                convertPath(aws.StringValue(conv.rule.Path)),
+		TargetContainer:     targetContainer,
+		TargetPort:          targetPort,
+		Aliases:             aliases,
+		HTTPHealthCheck:     convertHTTPHealthCheck(&conv.rule.HealthCheck),
+		AllowedSourceIps:    convertAllowedSourceIPs(conv.rule.AllowedSourceIps),
+		Stickiness:          strconv.FormatBool(aws.BoolValue(conv.rule.Stickiness)),
+		HTTPVersion:         aws.StringValue(convertHTTPVersion(conv.rule.ProtocolVersion)),
+		RedirectToHTTPS:     conv.redirectToHTTPS,
+		DeregistrationDelay: convertDeregistrationDelay(conv.rule.DeregistrationDelay),
+	}
+	return config, nil
+}
+
+func convertDeregistrationDelay(delay *time.Duration) *int64 {
+	if delay == nil {
+		return aws.Int64(int64(manifest.DefaultDeregistrationDelay))
+	}
+	return aws.Int64(int64(delay.Seconds()))
+}
+
+type nlbListeners []template.NetworkLoadBalancerListener
+
+// isCertRequired returns true if any of the NLB listeners have protocol as TLS set.
+func (ls nlbListeners) isCertRequired() bool {
+	for _, listener := range ls {
+		if listener.Protocol == manifest.TLS {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *LoadBalancedWebService) convertNetworkLoadBalancer() (networkLoadBalancerConfig, error) {
 	nlbConfig := s.manifest.NLBConfig
 	if nlbConfig.IsEmpty() {
 		return networkLoadBalancerConfig{}, nil
 	}
-
-	// Parse listener port and protocol.
-	port, protocol, err := manifest.ParsePortMapping(nlbConfig.Port)
+	exposedPorts, err := s.manifest.ExposedPorts()
 	if err != nil {
 		return networkLoadBalancerConfig{}, err
 	}
-	if protocol == nil {
-		protocol = aws.String(defaultNLBProtocol)
-	}
-
-	// Configure target container and port.
-	targetContainer := s.name
-	if nlbConfig.TargetContainer != nil {
-		targetContainer = aws.StringValue(nlbConfig.TargetContainer)
-	}
-
-	// By default, the target port is the same as listener port.
-	targetPort := aws.StringValue(port)
-	if targetContainer != s.name {
-		// If the target container is a sidecar container, the target port is the exposed sidecar port.
-		sideCarPort := s.manifest.Sidecars[targetContainer].Port // We validated that a sidecar container exposes a port if it is a target container.
-		port, _, err := manifest.ParsePortMapping(sideCarPort)
+	listeners := make(nlbListeners, len(nlbConfig.NLBListeners()))
+	for idx, listener := range nlbConfig.NLBListeners() {
+		// Parse targetContainer and targetPort for the Network Load Balancer targets.
+		targetContainer, targetPort, err := listener.Target(exposedPorts)
 		if err != nil {
 			return networkLoadBalancerConfig{}, err
 		}
-		targetPort = aws.StringValue(port)
-	}
-	// Finally, if a target port is explicitly specified, use that value.
-	if nlbConfig.TargetPort != nil {
-		targetPort = strconv.Itoa(aws.IntValue(nlbConfig.TargetPort))
+
+		// Parse listener port and protocol.
+		port, protocol, err := manifest.ParsePortMapping(listener.Port)
+		if err != nil {
+			return networkLoadBalancerConfig{}, err
+		}
+
+		if protocol == nil {
+			protocol = aws.String(defaultNLBProtocol)
+		}
+
+		listeners[idx] = template.NetworkLoadBalancerListener{
+			Port:                aws.StringValue(port),
+			Protocol:            strings.ToUpper(aws.StringValue(protocol)),
+			TargetContainer:     targetContainer,
+			TargetPort:          targetPort,
+			SSLPolicy:           listener.SSLPolicy,
+			HealthCheck:         convertNLBHealthCheck(&listener.HealthCheck),
+			Stickiness:          listener.Stickiness,
+			DeregistrationDelay: convertDeregistrationDelay(listener.DeregistrationDelay),
+		}
 	}
 
 	aliases, err := convertAlias(nlbConfig.Aliases)
@@ -445,33 +688,13 @@ func (s *LoadBalancedWebService) convertNetworkLoadBalancer() (networkLoadBalanc
 		return networkLoadBalancerConfig{}, fmt.Errorf(`convert "nlb.alias" to string slice: %w`, err)
 	}
 
-	hc := template.NLBHealthCheck{
-		HealthyThreshold:   nlbConfig.HealthCheck.HealthyThreshold,
-		UnhealthyThreshold: nlbConfig.HealthCheck.UnhealthyThreshold,
-	}
-	if nlbConfig.HealthCheck.Port != nil {
-		hc.Port = strconv.Itoa(aws.IntValue(nlbConfig.HealthCheck.Port))
-	}
-	if nlbConfig.HealthCheck.Timeout != nil {
-		hc.Timeout = aws.Int64(int64(nlbConfig.HealthCheck.Timeout.Seconds()))
-	}
-	if nlbConfig.HealthCheck.Interval != nil {
-		hc.Interval = aws.Int64(int64(nlbConfig.HealthCheck.Interval.Seconds()))
-	}
 	config := networkLoadBalancerConfig{
 		settings: &template.NetworkLoadBalancer{
-			PublicSubnetCIDRs: s.publicSubnetCIDRBlocks,
-			Listener: template.NetworkLoadBalancerListener{
-				Port:            aws.StringValue(port),
-				Protocol:        strings.ToUpper(aws.StringValue(protocol)),
-				TargetContainer: targetContainer,
-				TargetPort:      targetPort,
-				SSLPolicy:       nlbConfig.SSLPolicy,
-				Aliases:         aliases,
-				HealthCheck:     hc,
-				Stickiness:      nlbConfig.Stickiness,
-			},
-			MainContainerPort: s.containerPort(),
+			PublicSubnetCIDRs:   s.publicSubnetCIDRBlocks,
+			Listener:            listeners,
+			Aliases:             aliases,
+			MainContainerPort:   s.manifest.MainContainerPort(),
+			CertificateRequired: listeners.isCertRequired(),
 		},
 	}
 
@@ -483,11 +706,35 @@ func (s *LoadBalancedWebService) convertNetworkLoadBalancer() (networkLoadBalanc
 	return config, nil
 }
 
+func (s *LoadBalancedWebService) convertGracePeriod() *int64 {
+	if s.manifest.HTTPOrBool.Main.HealthCheck.Advanced.GracePeriod != nil {
+		return aws.Int64(int64(s.manifest.HTTPOrBool.Main.HealthCheck.Advanced.GracePeriod.Seconds()))
+	}
+	if s.manifest.NLBConfig.Listener.HealthCheck.GracePeriod != nil {
+		return aws.Int64(int64(s.manifest.NLBConfig.Listener.HealthCheck.GracePeriod.Seconds()))
+	}
+	return aws.Int64(int64(manifest.DefaultHealthCheckGracePeriod))
+}
+
 func convertExecuteCommand(e *manifest.ExecuteCommand) *template.ExecuteCommandOpts {
 	if e.Config.IsEmpty() && !aws.BoolValue(e.Enable) {
 		return nil
 	}
 	return &template.ExecuteCommandOpts{}
+}
+
+func convertAllowedSourceIPs(allowedSourceIPs []manifest.IPNet) []string {
+	var sourceIPs []string
+	for _, ipNet := range allowedSourceIPs {
+		sourceIPs = append(sourceIPs, string(ipNet))
+	}
+	return sourceIPs
+}
+
+func convertServiceConnect(s manifest.ServiceConnectBoolOrArgs) *template.ServiceConnect {
+	return &template.ServiceConnect{
+		Alias: s.ServiceConnectArgs.Alias,
+	}
 }
 
 func convertLogging(lc manifest.Logging) *template.LogConfigOpts {
@@ -500,7 +747,7 @@ func convertLogging(lc manifest.Logging) *template.LogConfigOpts {
 		EnableMetadata: lc.GetEnableMetadata(),
 		Destination:    lc.Destination,
 		SecretOptions:  convertSecrets(lc.SecretOptions),
-		Variables:      lc.Variables,
+		Variables:      convertEnvVars(lc.Variables),
 		Secrets:        convertSecrets(lc.Secrets),
 	}
 }
@@ -525,6 +772,7 @@ func convertStorageOpts(wlName *string, in manifest.Storage) *template.StorageOp
 	}
 	return &template.StorageOpts{
 		Ephemeral:         convertEphemeral(in.Ephemeral),
+		ReadonlyRootFS:    in.ReadonlyRootFS,
 		Volumes:           convertVolumes(in.Volumes),
 		MountPoints:       convertMountPoints(in.Volumes),
 		EFSPerms:          convertEFSPermissions(in.Volumes),
@@ -713,7 +961,16 @@ func convertNetworkConfig(network manifest.NetworkConfig) template.NetworkOpts {
 		AssignPublicIP: template.EnablePublicIP,
 		SubnetsType:    template.PublicSubnetsPlacement,
 	}
-	opts.SecurityGroups = network.VPC.SecurityGroups.GetIDs()
+	inSGs := network.VPC.SecurityGroups.GetIDs()
+	outSGs := make([]template.SecurityGroup, len(inSGs))
+	for i, sg := range inSGs {
+		if sg.Plain != nil {
+			outSGs[i] = template.PlainSecurityGroup(aws.StringValue(sg.Plain))
+		} else {
+			outSGs[i] = template.ImportedSecurityGroup(aws.StringValue(sg.FromCFN.Name))
+		}
+	}
+	opts.SecurityGroups = outSGs
 	opts.DenyDefaultSecurityGroup = network.VPC.SecurityGroups.IsDefaultSecurityGroupDenied()
 
 	placement := network.VPC.Placement
@@ -766,16 +1023,37 @@ func convertEntryPoint(entrypoint manifest.EntryPointOverride) ([]string, error)
 	return out, nil
 }
 
-func convertDeploymentConfig(deploymentConfig manifest.DeploymentConfiguration) template.DeploymentConfigurationOpts {
-	var deployConfigs template.DeploymentConfigurationOpts
-	if strings.EqualFold(aws.StringValue(deploymentConfig.Rolling), manifest.ECSRecreateRollingUpdateStrategy) {
-		deployConfigs.MinHealthyPercent = minHealthyPercentRecreate
-		deployConfigs.MaxPercent = maxPercentRecreate
-	} else {
-		deployConfigs.MinHealthyPercent = minHealthyPercentDefault
-		deployConfigs.MaxPercent = maxPercentDefault
+func convertDeploymentControllerConfig(in manifest.DeploymentControllerConfig) template.DeploymentConfigurationOpts {
+	out := template.DeploymentConfigurationOpts{
+		MinHealthyPercent: minHealthyPercentDefault,
+		MaxPercent:        maxPercentDefault,
 	}
-	return deployConfigs
+	if strings.EqualFold(aws.StringValue(in.Rolling), manifest.ECSRecreateRollingUpdateStrategy) {
+		out.MinHealthyPercent = minHealthyPercentRecreate
+		out.MaxPercent = maxPercentRecreate
+	}
+	return out
+}
+
+func convertDeploymentConfig(in manifest.DeploymentConfig) template.DeploymentConfigurationOpts {
+	out := convertDeploymentControllerConfig(in.DeploymentControllerConfig)
+	out.Rollback = template.RollingUpdateRollbackConfig{
+		AlarmNames:        in.RollbackAlarms.Basic,
+		CPUUtilization:    in.RollbackAlarms.Advanced.CPUUtilization,
+		MemoryUtilization: in.RollbackAlarms.Advanced.MemoryUtilization,
+	}
+	return out
+}
+
+func convertWorkerDeploymentConfig(in manifest.WorkerDeploymentConfig) template.DeploymentConfigurationOpts {
+	out := convertDeploymentControllerConfig(in.DeploymentControllerConfig)
+	out.Rollback = template.RollingUpdateRollbackConfig{
+		AlarmNames:        in.WorkerRollbackAlarms.Basic,
+		CPUUtilization:    in.WorkerRollbackAlarms.Advanced.CPUUtilization,
+		MemoryUtilization: in.WorkerRollbackAlarms.Advanced.MemoryUtilization,
+		MessagesDelayed:   in.WorkerRollbackAlarms.Advanced.MessagesDelayed,
+	}
+	return out
 }
 
 func convertCommand(command manifest.CommandOverride) ([]string, error) {
@@ -797,33 +1075,43 @@ func convertPublish(topics []manifest.Topic, accountID, region, app, env, svc st
 	var publishers template.PublishOpts
 	// convert the topics to template Topics
 	for _, topic := range topics {
+		var fifoConfig *template.FIFOTopicConfig
+		if topic.FIFO.IsEnabled() {
+			fifoConfig = &template.FIFOTopicConfig{}
+			if !topic.FIFO.Advanced.IsEmpty() {
+				fifoConfig = &template.FIFOTopicConfig{
+					ContentBasedDeduplication: topic.FIFO.Advanced.ContentBasedDeduplication,
+				}
+			}
+		}
 		publishers.Topics = append(publishers.Topics, &template.Topic{
-			Name:      topic.Name,
-			AccountID: accountID,
-			Partition: partition.ID(),
-			Region:    region,
-			App:       app,
-			Env:       env,
-			Svc:       svc,
+			Name:            topic.Name,
+			FIFOTopicConfig: fifoConfig,
+			AccountID:       accountID,
+			Partition:       partition.ID(),
+			Region:          region,
+			App:             app,
+			Env:             env,
+			Svc:             svc,
 		})
 	}
 
 	return &publishers, nil
 }
 
-func convertSubscribe(s manifest.SubscribeConfig) (*template.SubscribeOpts, error) {
-	if s.Topics == nil {
+func convertSubscribe(s *manifest.WorkerService) (*template.SubscribeOpts, error) {
+	if s.Subscribe.Topics == nil {
 		return nil, nil
 	}
 	var subscriptions template.SubscribeOpts
-	for _, sb := range s.Topics {
+	for _, sb := range s.Subscriptions() {
 		ts, err := convertTopicSubscription(sb)
 		if err != nil {
 			return nil, err
 		}
 		subscriptions.Topics = append(subscriptions.Topics, ts)
 	}
-	subscriptions.Queue = convertQueue(s.Queue)
+	subscriptions.Queue = convertQueue(s.Subscribe.Queue)
 	return &subscriptions, nil
 }
 
@@ -860,16 +1148,39 @@ func convertFilterPolicy(filterPolicy map[string]interface{}) (*string, error) {
 	return aws.String(string(bytes)), nil
 }
 
-func convertQueue(q manifest.SQSQueue) *template.SQSQueue {
-	if q.IsEmpty() {
+func convertQueue(in manifest.SQSQueue) *template.SQSQueue {
+	if in.IsEmpty() {
 		return nil
 	}
-	return &template.SQSQueue{
-		Retention:  convertRetention(q.Retention),
-		Delay:      convertDelay(q.Delay),
-		Timeout:    convertTimeout(q.Timeout),
-		DeadLetter: convertDeadLetter(q.DeadLetter),
+
+	queue := &template.SQSQueue{
+		Retention:  convertRetention(in.Retention),
+		Delay:      convertDelay(in.Delay),
+		Timeout:    convertTimeout(in.Timeout),
+		DeadLetter: convertDeadLetter(in.DeadLetter),
 	}
+
+	if !in.FIFO.IsEnabled() {
+		return queue
+	}
+
+	if aws.BoolValue(in.FIFO.Enable) {
+		queue.FIFOQueueConfig = &template.FIFOQueueConfig{}
+		return queue
+	}
+
+	if !in.FIFO.Advanced.IsEmpty() {
+		queue.FIFOQueueConfig = &template.FIFOQueueConfig{
+			ContentBasedDeduplication: in.FIFO.Advanced.ContentBasedDeduplication,
+			DeduplicationScope:        in.FIFO.Advanced.DeduplicationScope,
+			FIFOThroughputLimit:       in.FIFO.Advanced.FIFOThroughputLimit,
+		}
+		if aws.BoolValue(in.FIFO.Advanced.HighThroughputFifo) {
+			queue.FIFOQueueConfig.FIFOThroughputLimit = aws.String(sqsFIFOThroughputLimitPerMessageGroupId)
+			queue.FIFOQueueConfig.DeduplicationScope = aws.String(sqsDedupeScopeMessageGroup)
+		}
+	}
+	return queue
 }
 
 func convertTime(t *time.Duration) *int64 {
@@ -919,9 +1230,13 @@ func convertPlatform(platform manifest.PlatformArgsOrString) template.RuntimePla
 	os := template.OSLinux
 	switch platform.OS() {
 	case manifest.OSWindows, manifest.OSWindowsServer2019Core:
-		os = template.OSWindowsServerCore
+		os = template.OSWindowsServer2019Core
 	case manifest.OSWindowsServer2019Full:
-		os = template.OSWindowsServerFull
+		os = template.OSWindowsServer2019Full
+	case manifest.OSWindowsServer2022Core:
+		os = template.OSWindowsServer2022Core
+	case manifest.OSWindowsServer2022Full:
+		os = template.OSWindowsServer2022Full
 	}
 
 	arch := template.ArchX86
@@ -942,15 +1257,36 @@ func convertHTTPVersion(protocolVersion *string) *string {
 	return &pv
 }
 
+func convertEnvVars(variables map[string]manifest.Variable) map[string]template.Variable {
+	if len(variables) == 0 {
+		return nil
+	}
+	m := make(map[string]template.Variable, len(variables))
+	for name, variable := range variables {
+		if variable.RequiresImport() {
+			m[name] = template.ImportedVariable(variable.Value())
+			continue
+		}
+		m[name] = template.PlainVariable(variable.Value())
+	}
+	return m
+}
+
+// convertSecrets converts the manifest Secrets into a format parsable by the templates pkg.
 func convertSecrets(secrets map[string]manifest.Secret) map[string]template.Secret {
 	if len(secrets) == 0 {
 		return nil
 	}
-	m := make(map[string]template.Secret)
+	m := make(map[string]template.Secret, len(secrets))
+	var tplSecret template.Secret
 	for name, mftSecret := range secrets {
-		var tplSecret template.Secret = template.SecretFromSSMOrARN(mftSecret.Value())
-		if mftSecret.IsSecretsManagerName() {
+		switch {
+		case mftSecret.IsSecretsManagerName():
 			tplSecret = template.SecretFromSecretsManager(mftSecret.Value())
+		case mftSecret.RequiresImport():
+			tplSecret = template.SecretFromImportedSSMOrARN(mftSecret.Value())
+		default:
+			tplSecret = template.SecretFromPlainSSMOrARN(mftSecret.Value())
 		}
 		m[name] = tplSecret
 	}
@@ -970,4 +1306,14 @@ func convertCustomResources(urlForFunc map[string]string) (map[string]template.S
 		}
 	}
 	return out, nil
+}
+
+type uploadableCRs []*customresource.CustomResource
+
+func (in uploadableCRs) convert() []uploadable {
+	out := make([]uploadable, len(in))
+	for i, cr := range in {
+		out[i] = cr
+	}
+	return out
 }

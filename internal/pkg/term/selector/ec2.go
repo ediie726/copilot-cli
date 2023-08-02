@@ -20,12 +20,12 @@ type VPCSubnetLister interface {
 
 // EC2Select is a selector for Ec2 resources.
 type EC2Select struct {
-	prompt prompter
+	prompt Prompter
 	ec2Svc VPCSubnetLister
 }
 
 // NewEC2Select returns a new selector that chooses Ec2 resources.
-func NewEC2Select(prompt prompter, ec2Client VPCSubnetLister) *EC2Select {
+func NewEC2Select(prompt Prompter, ec2Client VPCSubnetLister) *EC2Select {
 	return &EC2Select{
 		prompt: prompt,
 		ec2Svc: ec2Client,
@@ -60,7 +60,7 @@ func (s *EC2Select) VPC(msg, help string) (string, error) {
 	return extractedVPC.ID, nil
 }
 
-// SubnetInputs holds the arguments for the subnet selector.
+// SubnetsInput holds the arguments for the subnet selector.
 type SubnetsInput struct {
 	Msg   string
 	Help  string

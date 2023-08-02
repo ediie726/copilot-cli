@@ -4,6 +4,7 @@
 package ecs
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -92,4 +93,137 @@ func TestService_ServiceStatus(t *testing.T) {
 		got := inService.ServiceStatus()
 		require.Equal(t, got, wanted)
 	})
+}
+
+func TestService_LastUpdatedAt(t *testing.T) {
+	mockTime1 := time.Unix(14945056, 0)
+	mockTime2 := time.Unix(14945059, 0)
+	t.Run("should return correct last updated value", func(t *testing.T) {
+		s := Service{
+			Deployments: []*ecs.Deployment{
+				{
+					UpdatedAt: &mockTime1,
+				},
+				{
+					UpdatedAt: &mockTime2,
+				},
+			},
+		}
+		got := s.LastUpdatedAt()
+		require.Equal(t, mockTime1, got)
+	})
+}
+
+func TestService_ServiceConnectAliases(t *testing.T) {
+	tests := map[string]struct {
+		inService *Service
+
+		wantedError error
+		wanted      []string
+	}{
+		"quit early if not enabled": {
+			inService: &Service{
+				Deployments: []*ecs.Deployment{
+					{
+						ServiceConnectConfiguration: &ecs.ServiceConnectConfiguration{
+							Enabled: aws.Bool(false),
+						},
+					},
+				},
+			},
+			wanted: []string{},
+		},
+		"success": {
+			inService: &Service{
+				Deployments: []*ecs.Deployment{
+					{
+						ServiceConnectConfiguration: &ecs.ServiceConnectConfiguration{
+							Enabled:   aws.Bool(true),
+							Namespace: aws.String("foobar.local"),
+							Services: []*ecs.ServiceConnectService{
+								{
+									PortName:      aws.String("frontend"),
+									DiscoveryName: aws.String("front"),
+								},
+								{
+									PortName: aws.String("frontend"),
+								},
+								{
+									PortName: aws.String("frontend"),
+									ClientAliases: []*ecs.ServiceConnectClientAlias{
+										{
+											Port: aws.Int64(5000),
+										},
+										{
+											DnsName: aws.String("api"),
+											Port:    aws.Int64(80),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wanted: []string{"front.foobar.local", "frontend.foobar.local", "frontend.foobar.local:5000", "api:80"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			// WHEN
+			get := tc.inService.ServiceConnectAliases()
+
+			// THEN
+			require.ElementsMatch(t, get, tc.wanted)
+		})
+	}
+}
+
+func TestParseServiceArn(t *testing.T) {
+	tests := map[string]struct {
+		inArnStr string
+
+		wantedError error
+		wantedArn   ServiceArn
+	}{
+		"error if invalid arn": {
+			inArnStr:    "random string",
+			wantedError: fmt.Errorf("arn: invalid prefix"),
+		},
+		"error if non ecs arn": {
+			inArnStr:    "arn:aws:acm:us-west-2:1234567890:service/my-project-test-Cluster-9F7Y0RLP60R7/my-project-test-myService-JSOH5GYBFAIB",
+			wantedError: fmt.Errorf(`expected an ECS arn, but got "arn:aws:acm:us-west-2:1234567890:service/my-project-test-Cluster-9F7Y0RLP60R7/my-project-test-myService-JSOH5GYBFAIB"`),
+		},
+		"error if invalid resource": {
+			inArnStr:    "arn:aws:ecs:us-west-2:1234567890:service/my-project-test-Cluster-9F7Y0RLP60R7",
+			wantedError: fmt.Errorf(`cannot parse resource for ARN "arn:aws:ecs:us-west-2:1234567890:service/my-project-test-Cluster-9F7Y0RLP60R7"`),
+		},
+		"error if invalid resource type": {
+			inArnStr:    "arn:aws:ecs:us-west-2:1234567890:task/my-project-test-Cluster-9F7Y0RLP60R7/my-project-test-myService-JSOH5GYBFAIB",
+			wantedError: fmt.Errorf(`expect an ECS service: got "arn:aws:ecs:us-west-2:1234567890:task/my-project-test-Cluster-9F7Y0RLP60R7/my-project-test-myService-JSOH5GYBFAIB"`),
+		},
+		"success": {
+			inArnStr: "arn:aws:ecs:us-west-2:1234567890:service/my-project-test-Cluster-9F7Y0RLP60R7/my-project-test-myService-JSOH5GYBFAIB",
+			wantedArn: ServiceArn{
+				accountID:   "1234567890",
+				partition:   "aws",
+				region:      "us-west-2",
+				name:        "my-project-test-myService-JSOH5GYBFAIB",
+				clusterName: "my-project-test-Cluster-9F7Y0RLP60R7",
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			// WHEN
+			arn, err := ParseServiceArn(tc.inArnStr)
+			if tc.wantedError != nil {
+				require.EqualError(t, tc.wantedError, err.Error())
+			} else {
+				require.Equal(t, tc.wantedArn, *arn)
+			}
+		})
+	}
 }

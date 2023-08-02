@@ -14,8 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// EnvironmentManifestType identifies that the type of manifest is environment manifest.
-const EnvironmentManifestType = "Environment"
+// Environmentmanifestinfo identifies that the type of manifest is environment manifest.
+const Environmentmanifestinfo = "Environment"
 
 var environmentManifestPath = "environment/manifest.yml"
 
@@ -64,7 +64,7 @@ func FromEnvConfig(cfg *config.Environment, parser template.Parser) *Environment
 	return &Environment{
 		Workload: Workload{
 			Name: stringP(cfg.Name),
-			Type: stringP(EnvironmentManifestType),
+			Type: stringP(Environmentmanifestinfo),
 		},
 		EnvironmentConfig: EnvironmentConfig{
 			Network: environmentNetworkConfig{
@@ -94,13 +94,24 @@ type EnvironmentConfig struct {
 	Network       environmentNetworkConfig `yaml:"network,omitempty,flow"`
 	Observability environmentObservability `yaml:"observability,omitempty,flow"`
 	HTTPConfig    EnvironmentHTTPConfig    `yaml:"http,omitempty,flow"`
-	CDNConfig     environmentCDNConfig     `yaml:"cdn,omitempty,flow"`
+	CDNConfig     EnvironmentCDNConfig     `yaml:"cdn,omitempty,flow"`
 }
 
-// IsIngressRestrictedToCDN returns whether or not an environment has its
+// IsPublicLBIngressRestrictedToCDN returns whether an environment has its
 // Public Load Balancer ingress restricted to a Content Delivery Network.
-func (mft *EnvironmentConfig) IsIngressRestrictedToCDN() bool {
-	return aws.BoolValue(mft.HTTPConfig.Public.SecurityGroupConfig.Ingress.RestrictiveIngress.CDNIngress)
+func (mft *EnvironmentConfig) IsPublicLBIngressRestrictedToCDN() bool {
+	// Check the fixed manifest first. This would be `http.public.ingress.cdn`.
+	// For more information, see https://github.com/aws/copilot-cli/pull/4068#issuecomment-1275080333
+	if !mft.HTTPConfig.Public.Ingress.IsEmpty() {
+		return aws.BoolValue(mft.HTTPConfig.Public.Ingress.CDNIngress)
+	}
+	// Fall through to the old manifest: `http.public.security_groups.ingress.cdn`.
+	return aws.BoolValue(mft.HTTPConfig.Public.DeprecatedSG.DeprecatedIngress.RestrictiveIngress.CDNIngress)
+}
+
+// GetPublicALBSourceIPs returns list of IPNet.
+func (mft *EnvironmentConfig) GetPublicALBSourceIPs() []IPNet {
+	return mft.HTTPConfig.Public.Ingress.SourceIPs
 }
 
 type environmentNetworkConfig struct {
@@ -108,10 +119,11 @@ type environmentNetworkConfig struct {
 }
 
 type environmentVPCConfig struct {
-	ID                  *string              `yaml:"id,omitempty"`
-	CIDR                *IPNet               `yaml:"cidr,omitempty"`
-	Subnets             subnetsConfiguration `yaml:"subnets,omitempty"`
-	SecurityGroupConfig securityGroupConfig  `yaml:"security_group,omitempty"`
+	ID                  *string                       `yaml:"id,omitempty"`
+	CIDR                *IPNet                        `yaml:"cidr,omitempty"`
+	Subnets             subnetsConfiguration          `yaml:"subnets,omitempty"`
+	SecurityGroupConfig securityGroupConfig           `yaml:"security_group,omitempty"`
+	FlowLogs            Union[*bool, VPCFlowLogsArgs] `yaml:"flow_logs,omitempty"`
 }
 
 type securityGroupConfig struct {
@@ -175,6 +187,16 @@ func (cfg *portsConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// VPCFlowLogsArgs holds the flow logs configuration.
+type VPCFlowLogsArgs struct {
+	Retention *int `yaml:"retention,omitempty"`
+}
+
+// IsZero implements yaml.IsZeroer.
+func (fl *VPCFlowLogsArgs) IsZero() bool {
+	return fl.Retention == nil
+}
+
 // EnvSecurityGroup returns the security group config if the user has set any values.
 // If there is no env security group settings, then returns nil and false.
 func (cfg *EnvironmentConfig) EnvSecurityGroup() (*securityGroupConfig, bool) {
@@ -184,24 +206,27 @@ func (cfg *EnvironmentConfig) EnvSecurityGroup() (*securityGroupConfig, bool) {
 	return nil, false
 }
 
-type environmentCDNConfig struct {
+// EnvironmentCDNConfig represents configuration of a CDN.
+type EnvironmentCDNConfig struct {
 	Enabled *bool
-	Config  advancedCDNConfig // mutually exclusive with Enabled
+	Config  AdvancedCDNConfig // mutually exclusive with Enabled
 }
 
-// advancedCDNConfig represents an advanced configuration for a Content Delivery Network.
-type advancedCDNConfig struct {
-	Certificate *string `yaml:"certificate"`
+// AdvancedCDNConfig represents an advanced configuration for a Content Delivery Network.
+type AdvancedCDNConfig struct {
+	Certificate  *string         `yaml:"certificate,omitempty"`
+	TerminateTLS *bool           `yaml:"terminate_tls,omitempty"`
+	Static       CDNStaticConfig `yaml:"static_assets,omitempty"`
 }
 
 // IsEmpty returns whether environmentCDNConfig is empty.
-func (cfg *environmentCDNConfig) IsEmpty() bool {
+func (cfg *EnvironmentCDNConfig) IsEmpty() bool {
 	return cfg.Enabled == nil && cfg.Config.isEmpty()
 }
 
 // isEmpty returns whether advancedCDNConfig is empty.
-func (cfg *advancedCDNConfig) isEmpty() bool {
-	return cfg.Certificate == nil
+func (cfg *AdvancedCDNConfig) isEmpty() bool {
+	return cfg.Certificate == nil && cfg.TerminateTLS == nil && cfg.Static.IsEmpty()
 }
 
 // CDNEnabled returns whether a CDN configuration has been enabled in the environment manifest.
@@ -212,10 +237,22 @@ func (cfg *EnvironmentConfig) CDNEnabled() bool {
 	return aws.BoolValue(cfg.CDNConfig.Enabled)
 }
 
+// HasImportedPublicALBCerts returns true when the environment's ALB
+// is configured with certs for the public listener.
+func (cfg *EnvironmentConfig) HasImportedPublicALBCerts() bool {
+	return cfg.HTTPConfig.Public.Certificates != nil
+}
+
+// CDNDoesTLSTermination returns true when the environment's CDN
+// is configured to terminate incoming TLS connections.
+func (cfg *EnvironmentConfig) CDNDoesTLSTermination() bool {
+	return aws.BoolValue(cfg.CDNConfig.Config.TerminateTLS)
+}
+
 // UnmarshalYAML overrides the default YAML unmarshaling logic for the environmentCDNConfig
 // struct, allowing it to perform more complex unmarshaling behavior.
 // This method implements the yaml.Unmarshaler (v3) interface.
-func (cfg *environmentCDNConfig) UnmarshalYAML(value *yaml.Node) error {
+func (cfg *EnvironmentCDNConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&cfg.Config); err != nil {
 		var yamlTypeErr *yaml.TypeError
 		if !errors.As(err, &yamlTypeErr) {
@@ -234,9 +271,21 @@ func (cfg *environmentCDNConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// IsEmpty returns true if vpc is not configured.
+// CDNStaticConfig represents the static config for CDN.
+type CDNStaticConfig struct {
+	Location string `yaml:"location,omitempty"`
+	Alias    string `yaml:"alias,omitempty"`
+	Path     string `yaml:"path,omitempty"`
+}
+
+// IsEmpty returns true if CDNStaticConfig is not configured.
+func (cfg CDNStaticConfig) IsEmpty() bool {
+	return cfg.Location == "" && cfg.Alias == "" && cfg.Path == ""
+}
+
+// IsEmpty returns true if environmentVPCConfig is not configured.
 func (cfg environmentVPCConfig) IsEmpty() bool {
-	return cfg.ID == nil && cfg.CIDR == nil && cfg.Subnets.IsEmpty()
+	return cfg.ID == nil && cfg.CIDR == nil && cfg.Subnets.IsEmpty() && cfg.FlowLogs.IsZero()
 }
 
 func (cfg *environmentVPCConfig) loadVPCConfig(env *config.CustomizeEnv) {
@@ -408,7 +457,9 @@ func (cfg *EnvironmentHTTPConfig) loadLBConfig(env *config.CustomizeEnv) {
 	if env.ImportVPC != nil && len(env.ImportVPC.PublicSubnetIDs) == 0 {
 		cfg.Private.InternalALBSubnets = env.InternalALBSubnets
 		cfg.Private.Certificates = env.ImportCertARNs
-		cfg.Private.SecurityGroupsConfig.Ingress.VPCIngress = aws.Bool(env.EnableInternalALBVPCIngress)
+		if env.EnableInternalALBVPCIngress { // NOTE: Do not load the configuration unless it's positive, so that the default manifest does not contain the unnecessary line `http.private.ingress.vpc: false`.
+			cfg.Private.Ingress.VPCIngress = aws.Bool(true)
+		}
 		return
 	}
 	cfg.Public.Certificates = env.ImportCertARNs
@@ -416,9 +467,11 @@ func (cfg *EnvironmentHTTPConfig) loadLBConfig(env *config.CustomizeEnv) {
 
 // PublicHTTPConfig represents the configuration settings for an environment public ALB.
 type PublicHTTPConfig struct {
-	SecurityGroupConfig ALBSecurityGroupsConfig `yaml:"security_groups,omitempty"`
-	Certificates        []string                `yaml:"certificates,omitempty"`
-	ELBAccessLogs       ELBAccessLogsArgsOrBool `yaml:"access_logs,omitempty"`
+	DeprecatedSG  DeprecatedALBSecurityGroupsConfig `yaml:"security_groups,omitempty"` // Deprecated. This configuration is now available inside Ingress field.
+	Certificates  []string                          `yaml:"certificates,omitempty"`
+	ELBAccessLogs ELBAccessLogsArgsOrBool           `yaml:"access_logs,omitempty"`
+	Ingress       RestrictiveIngress                `yaml:"ingress,omitempty"`
+	SSLPolicy     *string                           `yaml:"ssl_policy,omitempty"`
 }
 
 // ELBAccessLogsArgsOrBool is a custom type which supports unmarshaling yaml which
@@ -480,57 +533,47 @@ func (cfg *EnvironmentConfig) ELBAccessLogs() (*ELBAccessLogsArgs, bool) {
 	return &accessLogs.AdvancedConfig, true
 }
 
-// ALBSecurityGroupsConfig represents security group configuration settings for an ALB.
-type ALBSecurityGroupsConfig struct {
-	Ingress Ingress `yaml:"ingress"`
-}
-
-func (cfg ALBSecurityGroupsConfig) IsEmpty() bool {
-	return cfg.Ingress.IsEmpty()
-}
-
-// Ingress represents allowed ingress traffic from specified fields.
-type Ingress struct {
-	RestrictiveIngress RestrictiveIngress `yaml:"restrict_to"`
-	VPCIngress         *bool              `yaml:"from_vpc"`
-}
-
 // RestrictiveIngress represents ingress fields which restrict
 // default behavior of allowing all public ingress.
 type RestrictiveIngress struct {
-	CDNIngress *bool `yaml:"cdn"`
+	CDNIngress *bool   `yaml:"cdn"`
+	SourceIPs  []IPNet `yaml:"source_ips"`
+}
+
+// RelaxedIngress contains ingress configuration to add to a security group.
+type RelaxedIngress struct {
+	VPCIngress *bool `yaml:"vpc"`
+}
+
+// IsEmpty returns true if there are no specified fields for relaxed ingress.
+func (i RelaxedIngress) IsEmpty() bool {
+	return i.VPCIngress == nil
 }
 
 // IsEmpty returns true if there are no specified fields for restrictive ingress.
 func (i RestrictiveIngress) IsEmpty() bool {
-	return i.CDNIngress == nil
-}
-
-// IsEmpty returns true if there are no specified fields for ingress.
-func (i Ingress) IsEmpty() bool {
-	return i.VPCIngress == nil && i.RestrictiveIngress.IsEmpty()
+	return i.CDNIngress == nil && len(i.SourceIPs) == 0
 }
 
 // IsEmpty returns true if there is no customization to the public ALB.
 func (cfg PublicHTTPConfig) IsEmpty() bool {
-	return len(cfg.Certificates) == 0 && cfg.SecurityGroupConfig.IsEmpty() && cfg.ELBAccessLogs.isEmpty()
+	return len(cfg.Certificates) == 0 && cfg.DeprecatedSG.IsEmpty() && cfg.ELBAccessLogs.isEmpty() && cfg.Ingress.IsEmpty() && cfg.SSLPolicy == nil
 }
 
 type privateHTTPConfig struct {
-	InternalALBSubnets   []string             `yaml:"subnets,omitempty"`
-	Certificates         []string             `yaml:"certificates,omitempty"`
-	SecurityGroupsConfig securityGroupsConfig `yaml:"security_groups,omitempty"`
+	InternalALBSubnets []string                          `yaml:"subnets,omitempty"`
+	Certificates       []string                          `yaml:"certificates,omitempty"`
+	DeprecatedSG       DeprecatedALBSecurityGroupsConfig `yaml:"security_groups,omitempty"` // Deprecated. This field is now available in Ingress.
+	Ingress            RelaxedIngress                    `yaml:"ingress,omitempty"`
+	SSLPolicy          *string                           `yaml:"ssl_policy,omitempty"`
 }
 
 // IsEmpty returns true if there is no customization to the internal ALB.
 func (cfg privateHTTPConfig) IsEmpty() bool {
-	return len(cfg.InternalALBSubnets) == 0 && len(cfg.Certificates) == 0 && cfg.SecurityGroupsConfig.isEmpty()
+	return len(cfg.InternalALBSubnets) == 0 && len(cfg.Certificates) == 0 && cfg.DeprecatedSG.IsEmpty() && cfg.Ingress.IsEmpty() && cfg.SSLPolicy == nil
 }
 
-type securityGroupsConfig struct {
-	Ingress Ingress `yaml:"ingress"`
-}
-
-func (cfg securityGroupsConfig) isEmpty() bool {
-	return cfg.Ingress.IsEmpty()
+// HasVPCIngress returns true if the private ALB allows ingress from within the VPC.
+func (cfg privateHTTPConfig) HasVPCIngress() bool {
+	return aws.BoolValue(cfg.Ingress.VPCIngress) || aws.BoolValue(cfg.DeprecatedSG.DeprecatedIngress.VPCIngress)
 }

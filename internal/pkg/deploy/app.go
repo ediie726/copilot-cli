@@ -20,24 +20,17 @@ type CreateAppInput struct {
 	DNSDelegationAccounts []string          // Accounts to grant DNS access to for this application.
 	DomainName            string            // DNS Name used for this application.
 	DomainHostedZoneID    string            // Hosted Zone ID for the domain.
+	PermissionsBoundary   string            // Name of the IAM Managed Policy to set a permissions boundary.
 	AdditionalTags        map[string]string // AdditionalTags are labels applied to resources under the application.
 	Version               string            // The version of the application template to create the stack/stackset. If empty, creates the legacy stack/stackset.
 }
-
-const (
-	// LegacyAppTemplateVersion is the version associated with the application template before we started versioning.
-	LegacyAppTemplateVersion = "v0.0.0"
-	// LatestAppTemplateVersion is the latest version number available for application templates.
-	LatestAppTemplateVersion = "v1.0.2"
-	// AliasLeastAppTemplateVersion is the least version number available for HTTPS alias.
-	AliasLeastAppTemplateVersion = "v1.0.0"
-)
 
 // AppInformation holds information about the application that need to be propagated to the env stacks and workload stacks.
 type AppInformation struct {
 	AccountPrincipalARN string
 	Domain              string
 	Name                string
+	PermissionsBoundary string
 }
 
 // DNSDelegationRole returns the ARN of the app's DNS delegation role.

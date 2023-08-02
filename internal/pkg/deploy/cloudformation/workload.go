@@ -27,7 +27,7 @@ func (cf CloudFormation) DeployService(conf StackConfiguration, bucketName strin
 	for _, opt := range opts {
 		opt(stack)
 	}
-	return cf.executeAndRenderChangeSet(cf.newUpsertChangeSetInput(cf.console, stack))
+	return cf.executeAndRenderChangeSet(cf.newUpsertChangeSetInput(cf.console, stack, withEnableInterrupt()))
 }
 
 type uploadableStack interface {
@@ -66,6 +66,6 @@ func (cf CloudFormation) DeleteWorkload(in deploy.DeleteWorkloadInput) error {
 	stackName := fmt.Sprintf("%s-%s-%s", in.AppName, in.EnvName, in.Name)
 	description := fmt.Sprintf("Delete stack %s", stackName)
 	return cf.deleteAndRenderStack(stackName, description, func() error {
-		return cf.cfnClient.DeleteAndWait(stackName)
+		return cf.cfnClient.DeleteAndWaitWithRoleARN(stackName, in.ExecutionRoleARN)
 	})
 }

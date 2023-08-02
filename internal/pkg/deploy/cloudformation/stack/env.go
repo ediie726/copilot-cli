@@ -6,84 +6,172 @@ package stack
 import (
 	"fmt"
 
+	"github.com/aws/copilot-cli/internal/pkg/aws/s3"
+
+	"github.com/aws/copilot-cli/internal/pkg/deploy/upload/customresource"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
+	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/google/uuid"
 )
 
-type envReadParser interface {
-	template.ReadParser
-	ParseEnv(data *template.EnvOpts) (*template.Content, error)
-	ParseEnvBootstrap(data *template.EnvOpts, options ...template.ParseOption) (*template.Content, error)
-}
-
-// EnvStackConfig is for providing all the values to set up an
-// environment stack and to interpret the outputs from it.
-type EnvStackConfig struct {
-	in                *deploy.CreateEnvironmentInput
-	lastForceUpdateID string
-	prevParams        []*cloudformation.Parameter
-	parser            envReadParser
-}
-
+// Parameter keys.
 const (
-	// Parameter keys.
+	EnvParamAliasesKey                     = "Aliases"
+	EnvParamALBWorkloadsKey                = "ALBWorkloads"
+	EnvParamServiceDiscoveryEndpoint       = "ServiceDiscoveryEndpoint"
 	envParamAppNameKey                     = "AppName"
 	envParamEnvNameKey                     = "EnvironmentName"
 	envParamToolsAccountPrincipalKey       = "ToolsAccountPrincipalARN"
 	envParamAppDNSKey                      = "AppDNSName"
 	envParamAppDNSDelegationRoleKey        = "AppDNSDelegationRole"
-	EnvParamAliasesKey                     = "Aliases"
-	EnvParamALBWorkloadsKey                = "ALBWorkloads"
 	envParamInternalALBWorkloadsKey        = "InternalALBWorkloads"
 	envParamEFSWorkloadsKey                = "EFSWorkloads"
 	envParamNATWorkloadsKey                = "NATWorkloads"
+	envParamAppRunnerPrivateWorkloadsKey   = "AppRunnerPrivateWorkloads"
 	envParamCreateHTTPSListenerKey         = "CreateHTTPSListener"
 	envParamCreateInternalHTTPSListenerKey = "CreateInternalHTTPSListener"
-	EnvParamServiceDiscoveryEndpoint       = "ServiceDiscoveryEndpoint"
+)
 
-	// Output keys.
+// Output keys.
+const (
 	EnvOutputVPCID               = "VpcId"
 	EnvOutputPublicSubnets       = "PublicSubnets"
 	EnvOutputPrivateSubnets      = "PrivateSubnets"
 	envOutputCFNExecutionRoleARN = "CFNExecutionRoleARN"
 	envOutputManagerRoleKey      = "EnvironmentManagerRoleARN"
+)
 
-	// Default parameter values.
+const (
+	// DefaultVPCCIDR is the default CIDR used for a manged VPC.
 	DefaultVPCCIDR = "10.0.0.0/16"
 )
 
 var (
-	fmtServiceDiscoveryEndpoint = "%s.%s.local"
-	DefaultPublicSubnetCIDRs    = []string{"10.0.0.0/24", "10.0.1.0/24"}
-	DefaultPrivateSubnetCIDRs   = []string{"10.0.2.0/24", "10.0.3.0/24"}
+	// DefaultPublicSubnetCIDRs contains two default CIDRs for the two managed public subnets.
+	DefaultPublicSubnetCIDRs = []string{"10.0.0.0/24", "10.0.1.0/24"}
+	// DefaultPrivateSubnetCIDRs contains two default CIDRs for the two managed private subnets.
+	DefaultPrivateSubnetCIDRs = []string{"10.0.2.0/24", "10.0.3.0/24"}
 )
 
-// NewEnvStackConfig return o CloudFormation stack configuration for deploying a brand new environment.
-func NewEnvStackConfig(input *deploy.CreateEnvironmentInput) *EnvStackConfig {
-	return &EnvStackConfig{
-		in:     input,
-		parser: template.New(),
+var fmtServiceDiscoveryEndpoint = "%s.%s.local"
+
+// Addons contains information about a packaged addons.
+type Addons struct {
+	S3ObjectURL string                // S3ObjectURL is the URL where the addons template is uploaded.
+	Stack       NestedStackConfigurer // Stack generates the template and the parameters to the addons.
+}
+
+// EnvConfig holds the fields required to deploy an environment.
+type EnvConfig struct {
+	Name    string // Name of the environment, must be unique within an application.
+	Version string // The version of the environment template to create the stack. If empty, creates the legacy stack.
+
+	// Application regional configurations.
+	App                  deploy.AppInformation // Information about the application that the environment belongs to, include app name, DNS name, the principal ARN of the account.
+	AdditionalTags       map[string]string     // AdditionalTags are labels applied to resources under the application.
+	ArtifactBucketARN    string                // ARN of the regional application bucket.
+	ArtifactBucketKeyARN string                // ARN of the KMS key used to encrypt the contents in the regional application bucket.
+	PermissionsBoundary  string                // Optional. An IAM Managed Policy name used as permissions boundary for IAM roles.
+
+	// Runtime configurations.
+	Addons              *Addons
+	CustomResourcesURLs map[string]string //  Mapping of Custom Resource Function Name to the S3 URL where the function zip file is stored.
+
+	// User inputs.
+	ImportVPCConfig     *config.ImportVPC     // Optional configuration if users have an existing VPC.
+	AdjustVPCConfig     *config.AdjustVPC     // Optional configuration if users want to override default VPC configuration.
+	ImportCertARNs      []string              // Optional configuration if users want to import certificates.
+	InternalALBSubnets  []string              // Optional configuration if users want to specify internal ALB placement.
+	AllowVPCIngress     bool                  // Optional configuration to allow access to internal ALB from ports 80/443.
+	CIDRPrefixListIDs   []string              // Optional configuration to specify public security group ingress based on prefix lists.
+	PublicALBSourceIPs  []string              // Optional configuration to specify public security group ingress based on customer given source IPs.
+	InternalLBSourceIPs []string              // Optional configuration to specify private security group ingress based on customer given source IPs.
+	Telemetry           *config.Telemetry     // Optional observability and monitoring configuration.
+	Mft                 *manifest.Environment // Unmarshaled and interpolated manifest object.
+	RawMft              []byte                // Content of the environment manifest without any modifications.
+	ForceUpdate         bool
+}
+
+func (cfg *EnvConfig) loadCustomResourceURLs(crs []uploadable) error {
+	if len(cfg.CustomResourcesURLs) != 0 {
+		return nil
 	}
+	bucket, _, err := s3.ParseARN(cfg.ArtifactBucketARN)
+	if err != nil {
+		return fmt.Errorf("parse artifact bucket ARN: %w", err)
+	}
+	cfg.CustomResourcesURLs = make(map[string]string, len(crs))
+	for _, cr := range crs {
+		cfg.CustomResourcesURLs[cr.Name()] = s3.Location(bucket, cr.ArtifactPath())
+	}
+	return nil
+}
+
+// Env is for providing all the values to set up an
+// environment stack and to interpret the outputs from it.
+type Env struct {
+	in                *EnvConfig
+	lastForceUpdateID string
+	prevParams        []*cloudformation.Parameter
+	parser            envReadParser
+}
+
+// NewEnvStackConfig returns a CloudFormation stack configuration for deploying a brand-new environment.
+func NewEnvStackConfig(input *EnvConfig) (*Env, error) {
+	crs, err := customresource.Env(fs)
+	if err != nil {
+		return nil, fmt.Errorf("environment custom resources: %w", err)
+	}
+	if err := input.loadCustomResourceURLs(uploadableCRs(crs).convert()); err != nil {
+		return nil, err
+	}
+	return &Env{
+		in:     input,
+		parser: fs,
+	}, nil
 }
 
 // NewEnvConfigFromExistingStack returns a CloudFormation stack configuration for updating an environment.
-func NewEnvConfigFromExistingStack(in *deploy.CreateEnvironmentInput, lastForceUpdateID string, prevParams []*cloudformation.Parameter) *EnvStackConfig {
-	return &EnvStackConfig{
+func NewEnvConfigFromExistingStack(in *EnvConfig, lastForceUpdateID string, prevParams []*cloudformation.Parameter) (*Env, error) {
+	crs, err := customresource.Env(fs)
+	if err != nil {
+		return nil, fmt.Errorf("environment custom resources: %w", err)
+	}
+	if err := in.loadCustomResourceURLs(uploadableCRs(crs).convert()); err != nil {
+		return nil, err
+	}
+	return &Env{
 		in:                in,
 		prevParams:        prevParams,
 		lastForceUpdateID: lastForceUpdateID,
-		parser:            template.New(),
-	}
+		parser:            fs,
+	}, nil
 }
 
 // Template returns the environment CloudFormation template.
-func (e *EnvStackConfig) Template() (string, error) {
+func (e *Env) Template() (string, error) {
 	crs, err := convertCustomResources(e.in.CustomResourcesURLs)
+	if err != nil {
+		return "", err
+	}
+	var addons *template.Addons
+	if e.in.Addons != nil {
+		extraParams, err := e.in.Addons.Stack.Parameters()
+		if err != nil {
+			return "", fmt.Errorf("parse extra parameters for environment addons: %w", err)
+		}
+		addons = &template.Addons{
+			URL:         e.in.Addons.S3ObjectURL,
+			ExtraParams: extraParams,
+		}
+	}
+	vpcConfig, err := e.vpcConfig()
 	if err != nil {
 		return "", err
 	}
@@ -95,31 +183,21 @@ func (e *EnvStackConfig) Template() (string, error) {
 		}
 		forceUpdateID = id.String()
 	}
-
-	publicHTTPConfig, err := e.publicHTTPConfig()
-	if err != nil {
-		return "", err
-	}
-
-	vpcConfig, err := e.vpcConfig()
-	if err != nil {
-		return "", err
-	}
-
 	content, err := e.parser.ParseEnv(&template.EnvOpts{
 		AppName:              e.in.App.Name,
 		EnvName:              e.in.Name,
 		CustomResources:      crs,
+		Addons:               addons,
 		ArtifactBucketARN:    e.in.ArtifactBucketARN,
 		ArtifactBucketKeyARN: e.in.ArtifactBucketKeyARN,
-		PublicHTTPConfig:     publicHTTPConfig,
+		PermissionsBoundary:  e.in.PermissionsBoundary,
+		PublicHTTPConfig:     e.publicHTTPConfig(),
 		VPCConfig:            vpcConfig,
 		PrivateHTTPConfig:    e.privateHTTPConfig(),
 		Telemetry:            e.telemetryConfig(),
 		CDNConfig:            e.cdnConfig(),
 
-		Version:            e.in.Version,
-		LatestVersion:      deploy.LatestEnvTemplateVersion,
+		LatestVersion:      e.in.Version,
 		SerializedManifest: string(e.in.RawMft),
 		ForceUpdateID:      forceUpdateID,
 		DelegateDNS:        e.in.App.Domain != "",
@@ -131,7 +209,7 @@ func (e *EnvStackConfig) Template() (string, error) {
 }
 
 // Parameters returns the parameters to be passed into an environment CloudFormation template.
-func (e *EnvStackConfig) Parameters() ([]*cloudformation.Parameter, error) {
+func (e *Env) Parameters() ([]*cloudformation.Parameter, error) {
 	httpsListener := "false"
 	if len(e.importPublicCertARNs()) != 0 || e.in.App.Domain != "" {
 		httpsListener = "true"
@@ -193,22 +271,26 @@ func (e *EnvStackConfig) Parameters() ([]*cloudformation.Parameter, error) {
 			ParameterKey:   aws.String(envParamNATWorkloadsKey),
 			ParameterValue: aws.String(""),
 		},
+		{
+			ParameterKey:   aws.String(envParamAppRunnerPrivateWorkloadsKey),
+			ParameterValue: aws.String(""),
+		},
 	}
 	if e.prevParams == nil {
 		return currParams, nil
 	}
 	// If we're creating a stack configuration for an existing environment stack, ensure the previous env controller
 	// managed parameters are using the previous value.
-	return e.transformParameters(currParams, e.prevParams, transformEnvControllerParameters)
+	return e.transformParameters(currParams, e.prevParams, transformEnvControllerParameters, e.transformServiceDiscoveryEndpoint)
 }
 
 // SerializedParameters returns the CloudFormation stack's parameters serialized to a JSON document.
-func (e *EnvStackConfig) SerializedParameters() (string, error) {
+func (e *Env) SerializedParameters() (string, error) {
 	return serializeTemplateConfig(e.parser, e)
 }
 
 // Tags returns the tags that should be applied to the environment CloudFormation stack.
-func (e *EnvStackConfig) Tags() []*cloudformation.Tag {
+func (e *Env) Tags() []*cloudformation.Tag {
 	return mergeAndFlattenTags(e.in.AdditionalTags, map[string]string{
 		deploy.AppTagKey: e.in.App.Name,
 		deploy.EnvTagKey: e.in.Name,
@@ -216,24 +298,24 @@ func (e *EnvStackConfig) Tags() []*cloudformation.Tag {
 }
 
 // StackName returns the name of the CloudFormation stack (based on the app and env names).
-func (e *EnvStackConfig) StackName() string {
+func (e *Env) StackName() string {
 	return NameForEnv(e.in.App.Name, e.in.Name)
 }
 
+type transformParameterFunc func(new, old *cloudformation.Parameter) *cloudformation.Parameter
+
 // transformParameters removes or transforms each of the current parameters and does not add any new parameters.
 // This means that parameters that exist only in the old template are left out.
-// The parameter`transform` is a function that transform a parameter, given its value in the new template and the old template.
-// If `old` is `nil`, the parameter does not exist in the old template.
-// `transform` should return `nil` if caller intends to delete the parameter.
-func (e *EnvStackConfig) transformParameters(
-	currParams []*cloudformation.Parameter,
-	oldParams []*cloudformation.Parameter,
-	transform func(new cloudformation.Parameter, old *cloudformation.Parameter) *cloudformation.Parameter) ([]*cloudformation.Parameter, error) {
-
+// The parameter`transformFunc` are functions that transform a parameter, given its value in the new template and the old template.
+// Each transform functions should keep the following in mind:
+// 1. It should return `nil` if the parameter should be removed.
+// 2. The transform functions are applied in a convolutional manner.
+// 3. If the parameter `old` is passed in as `nil`, the parameter does not exist in the old template.
+func (e *Env) transformParameters(currParams, oldParams []*cloudformation.Parameter, transformFunc ...transformParameterFunc) ([]*cloudformation.Parameter, error) {
 	// Make a map out of `currParams` and out of `oldParams`.
-	curr := make(map[string]cloudformation.Parameter)
+	curr := make(map[string]*cloudformation.Parameter)
 	for _, p := range currParams {
-		curr[aws.StringValue(p.ParameterKey)] = *p
+		curr[aws.StringValue(p.ParameterKey)] = p
 	}
 	old := make(map[string]*cloudformation.Parameter)
 	for _, p := range oldParams {
@@ -243,57 +325,79 @@ func (e *EnvStackConfig) transformParameters(
 	// Remove or transform each of the current parameters.
 	var params []*cloudformation.Parameter
 	for k, p := range curr {
-		if transformed := transform(p, old[k]); transformed != nil {
-			params = append(params, transformed)
+		currP := p
+		for _, transform := range transformFunc {
+			currP = transform(currP, old[k])
+		}
+		if currP != nil {
+			params = append(params, currP)
 		}
 	}
 	return params, nil
 }
 
-// transformEnvControllerParameters transforms a parameter such that it uses its previous value if:
-// 1. The parameter exists in the old template.
-// 2. The parameter is env-controller managed.
-// Otherwise, it returns the parameter untouched.
-func transformEnvControllerParameters(new cloudformation.Parameter, old *cloudformation.Parameter) *cloudformation.Parameter {
-	if old == nil { // The ParamKey doesn't exist in the old stack, use the new value.
-		return &new
+// transformEnvControllerParameters transforms an env-controller managed parameter.
+// If the parameter exists in the old template, it returns the old parameter assuming that old.ParameterKey = new.ParameterKey.
+// Otherwise, it returns its new default value.
+func transformEnvControllerParameters(new, old *cloudformation.Parameter) *cloudformation.Parameter {
+	if new == nil {
+		return nil
 	}
-
-	var (
-		isEnvControllerManaged = make(map[string]struct{})
-		exists                 = struct{}{}
-	)
+	isEnvControllerManaged := make(map[string]struct{})
 	for _, f := range template.AvailableEnvFeatures() {
-		isEnvControllerManaged[f] = exists
+		isEnvControllerManaged[f] = struct{}{}
 	}
 	if _, ok := isEnvControllerManaged[aws.StringValue(new.ParameterKey)]; !ok {
-		return &new
+		return new
 	}
-	return &cloudformation.Parameter{
-		ParameterKey: new.ParameterKey,
-
-		// Ideally, we would set `UsePreviousValue: true` unfortunately CodePipeline template config does not support it.
-		// https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-cfn-artifacts.html#w2ab1c21c15c15
-		ParameterValue: old.ParameterValue,
+	if old == nil { // The EnvController-managed parameter doesn't exist in the old stack. Use the new value.
+		return new
 	}
+	// Ideally, we would return `&cloudformation.Parameter{ ParameterKey: new.ParameterKey, UsePreviousValue: true}`.
+	// Unfortunately CodePipeline template config does not support it.
+	// https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-cfn-artifacts.html#w2ab1c21c15c15
+	return old
 }
 
-// NewBootstrapEnvStackConfig sets up a BootstrapEnvStackConfig struct.
-func NewBootstrapEnvStackConfig(input *deploy.CreateEnvironmentInput) *BootstrapEnvStackConfig {
-	return &BootstrapEnvStackConfig{
+// transformServiceDiscoveryEndpoint transforms the service discovery endpoint parameter.
+// If the parameter exists in the old template, it uses its previous value.
+// Otherwise, it uses a default value of `<app>.local`.
+func (e *Env) transformServiceDiscoveryEndpoint(new, old *cloudformation.Parameter) *cloudformation.Parameter {
+	if new == nil {
+		return nil
+	}
+	if aws.StringValue(new.ParameterKey) != EnvParamServiceDiscoveryEndpoint {
+		return new
+	}
+	if old == nil {
+		return &cloudformation.Parameter{
+			ParameterKey:   new.ParameterKey,
+			ParameterValue: aws.String(fmt.Sprintf(`%s.local`, e.in.App.Name)),
+		}
+	}
+	// Ideally, we would return `&cloudformation.Parameter{ ParameterKey: new.ParameterKey, UsePreviousValue: true}`.
+	// Unfortunately CodePipeline template config does not support it.
+	// https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-cfn-artifacts.html#w2ab1c21c15c15
+	return old
+}
+
+// NewBootstrapEnvStackConfig sets up a BootstrapEnv struct.
+func NewBootstrapEnvStackConfig(input *EnvConfig) *BootstrapEnv {
+	return &BootstrapEnv{
 		in:     input,
 		parser: template.New(),
 	}
 }
 
-// BootstrapEnvStackConfig contains information for creating a stack bootstrapping environment resources.
-type BootstrapEnvStackConfig EnvStackConfig
+// BootstrapEnv contains information for creating a stack bootstrapping environment resources.
+type BootstrapEnv Env
 
 // Template returns the CloudFormation template to bootstrap environment resources.
-func (e *BootstrapEnvStackConfig) Template() (string, error) {
+func (e *BootstrapEnv) Template() (string, error) {
 	content, err := e.parser.ParseEnvBootstrap(&template.EnvOpts{
 		ArtifactBucketARN:    e.in.ArtifactBucketARN,
 		ArtifactBucketKeyARN: e.in.ArtifactBucketKeyARN,
+		PermissionsBoundary:  e.in.PermissionsBoundary,
 	})
 	if err != nil {
 		return "", err
@@ -302,7 +406,7 @@ func (e *BootstrapEnvStackConfig) Template() (string, error) {
 }
 
 // Parameters returns the parameters to be passed into the bootstrap stack's CloudFormation template.
-func (e *BootstrapEnvStackConfig) Parameters() ([]*cloudformation.Parameter, error) {
+func (e *BootstrapEnv) Parameters() ([]*cloudformation.Parameter, error) {
 	return []*cloudformation.Parameter{
 		{
 			ParameterKey:   aws.String(envParamAppNameKey),
@@ -321,24 +425,24 @@ func (e *BootstrapEnvStackConfig) Parameters() ([]*cloudformation.Parameter, err
 
 // SerializedParameters returns the CloudFormation stack's parameters serialized
 // to a YAML document annotated with comments for readability to users.
-func (e *BootstrapEnvStackConfig) SerializedParameters() (string, error) {
+func (e *BootstrapEnv) SerializedParameters() (string, error) {
 	// No-op for now.
 	return "", nil
 }
 
 // Tags returns the tags that should be applied to the bootstrap CloudFormation stack.
-func (e *BootstrapEnvStackConfig) Tags() []*cloudformation.Tag {
-	return (*EnvStackConfig)(e).Tags()
+func (e *BootstrapEnv) Tags() []*cloudformation.Tag {
+	return (*Env)(e).Tags()
 }
 
 // StackName returns the name of the CloudFormation stack (based on the app and env names).
-func (e *BootstrapEnvStackConfig) StackName() string {
-	return (*EnvStackConfig)(e).StackName()
+func (e *BootstrapEnv) StackName() string {
+	return (*Env)(e).StackName()
 }
 
-// ToEnv inspects an environment cloudformation stack and constructs an environment
+// ToEnvMetadata inspects an environment cloudformation stack and constructs an environment
 // struct out of it (including resources like ECR Repo).
-func (e *BootstrapEnvStackConfig) ToEnv(stack *cloudformation.Stack) (*config.Environment, error) {
+func (e *BootstrapEnv) ToEnvMetadata(stack *cloudformation.Stack) (*config.Environment, error) {
 	stackARN, err := arn.Parse(*stack.StackId)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't extract region and account from stack ID %s: %w", *stack.StackId, err)
@@ -359,51 +463,66 @@ func (e *BootstrapEnvStackConfig) ToEnv(stack *cloudformation.Stack) (*config.En
 	}, nil
 }
 
-func (e *EnvStackConfig) cdnConfig() *template.CDNConfig {
-	if e.in.Mft == nil {
+func (e *Env) cdnConfig() *template.CDNConfig {
+	if e.in.Mft == nil || !e.in.Mft.CDNEnabled() {
 		return nil
 	}
-	if !e.in.Mft.CDNEnabled() {
-		return nil
+	mftConfig := e.in.Mft.CDNConfig.Config
+	config := &template.CDNConfig{
+		ImportedCertificate: mftConfig.Certificate,
+		TerminateTLS:        aws.BoolValue(mftConfig.TerminateTLS),
 	}
-	return &template.CDNConfig{
-		ImportedCertificate: e.in.Mft.CDNConfig.Config.Certificate,
+	if !mftConfig.Static.IsEmpty() {
+		config.Static = &template.CDNStaticAssetConfig{
+			ImportedBucket: mftConfig.Static.Location,
+			Path:           mftConfig.Static.Path,
+			Alias:          mftConfig.Static.Alias,
+		}
+	}
+	return config
+}
+
+func (e *Env) publicHTTPConfig() template.PublicHTTPConfig {
+	return template.PublicHTTPConfig{
+		HTTPConfig: template.HTTPConfig{
+			ImportedCertARNs: e.importPublicCertARNs(),
+			SSLPolicy:        e.getPublicSSLPolicy(),
+		},
+		PublicALBSourceIPs: e.in.PublicALBSourceIPs,
+		CIDRPrefixListIDs:  e.in.CIDRPrefixListIDs,
+		ELBAccessLogs:      convertELBAccessLogsConfig(e.in.Mft),
 	}
 }
 
-func (e *EnvStackConfig) publicHTTPConfig() (template.HTTPConfig, error) {
-	elbAccessLogsConfig, err := convertELBAccessLogsConfig(e.in.Mft)
-	if err != nil {
-		return template.HTTPConfig{}, err
-	}
-	return template.HTTPConfig{
-		CIDRPrefixListIDs: e.in.CIDRPrefixListIDs,
-		ImportedCertARNs:  e.importPublicCertARNs(),
-		ELBAccessLogs:     elbAccessLogsConfig,
-	}, nil
-}
-
-func (e *EnvStackConfig) privateHTTPConfig() template.HTTPConfig {
-	return template.HTTPConfig{
-		ImportedCertARNs: e.importPrivateCertARNs(),
+func (e *Env) privateHTTPConfig() template.PrivateHTTPConfig {
+	return template.PrivateHTTPConfig{
+		HTTPConfig: template.HTTPConfig{
+			ImportedCertARNs: e.importPrivateCertARNs(),
+			SSLPolicy:        e.getPrivateSSLPolicy(),
+		},
 		CustomALBSubnets: e.internalALBSubnets(),
 	}
 }
 
-func (e *EnvStackConfig) vpcConfig() (template.VPCConfig, error) {
+func (e *Env) vpcConfig() (template.VPCConfig, error) {
 	securityGroupConfig, err := convertEnvSecurityGroupCfg(e.in.Mft)
+	if err != nil {
+		return template.VPCConfig{}, err
+	}
+	flowLogs, err := convertFlowLogsConfig(e.in.Mft)
 	if err != nil {
 		return template.VPCConfig{}, err
 	}
 	return template.VPCConfig{
 		Imported:            e.importVPC(),
 		Managed:             e.managedVPC(),
-		AllowVPCIngress:     aws.BoolValue(e.in.Mft.HTTPConfig.Private.SecurityGroupsConfig.Ingress.VPCIngress),
+		AllowVPCIngress:     e.in.Mft.HTTPConfig.Private.HasVPCIngress(),
 		SecurityGroupConfig: securityGroupConfig,
+		FlowLogs:            flowLogs,
 	}, nil
 }
 
-func (e *EnvStackConfig) importVPC() *template.ImportVPC {
+func (e *Env) importVPC() *template.ImportVPC {
 	// If a manifest is present, it is the only place we look at.
 	if e.in.Mft != nil {
 		return e.in.Mft.Network.VPC.ImportedVPC()
@@ -420,7 +539,7 @@ func (e *EnvStackConfig) importVPC() *template.ImportVPC {
 	}
 }
 
-func (e *EnvStackConfig) managedVPC() template.ManagedVPC {
+func (e *Env) managedVPC() template.ManagedVPC {
 	defaultManagedVPC := template.ManagedVPC{
 		CIDR:               DefaultVPCCIDR,
 		PublicSubnetCIDRs:  DefaultPublicSubnetCIDRs,
@@ -446,7 +565,7 @@ func (e *EnvStackConfig) managedVPC() template.ManagedVPC {
 	}
 }
 
-func (e *EnvStackConfig) telemetryConfig() *template.Telemetry {
+func (e *Env) telemetryConfig() *template.Telemetry {
 	// If a manifest is present, it is the only place we look at.
 	if e.in.Mft != nil {
 		return &template.Telemetry{
@@ -466,7 +585,7 @@ func (e *EnvStackConfig) telemetryConfig() *template.Telemetry {
 	}
 }
 
-func (e *EnvStackConfig) importPublicCertARNs() []string {
+func (e *Env) importPublicCertARNs() []string {
 	// If a manifest is present, it is the only place we look at.
 	if e.in.Mft != nil {
 		return e.in.Mft.HTTPConfig.Public.Certificates
@@ -478,7 +597,7 @@ func (e *EnvStackConfig) importPublicCertARNs() []string {
 	return e.in.ImportCertARNs
 }
 
-func (e *EnvStackConfig) importPrivateCertARNs() []string {
+func (e *Env) importPrivateCertARNs() []string {
 	// If a manifest is present, it is the only place we look at.
 	if e.in.Mft != nil {
 		return e.in.Mft.HTTPConfig.Private.Certificates
@@ -490,11 +609,19 @@ func (e *EnvStackConfig) importPrivateCertARNs() []string {
 	return nil
 }
 
-func (e *EnvStackConfig) internalALBSubnets() []string {
+func (e *Env) internalALBSubnets() []string {
 	// If a manifest is present, it is the only place we look.
 	if e.in.Mft != nil {
 		return e.in.Mft.HTTPConfig.Private.InternalALBSubnets
 	}
 	// Fallthrough to SSM config.
 	return e.in.InternalALBSubnets
+}
+
+func (e *Env) getPublicSSLPolicy() *string {
+	return e.in.Mft.EnvironmentConfig.HTTPConfig.Public.SSLPolicy
+}
+
+func (e *Env) getPrivateSSLPolicy() *string {
+	return e.in.Mft.EnvironmentConfig.HTTPConfig.Private.SSLPolicy
 }

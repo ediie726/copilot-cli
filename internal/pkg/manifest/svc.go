@@ -7,39 +7,43 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
+	"github.com/aws/copilot-cli/internal/pkg/template"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	// LoadBalancedWebServiceType is a web service with a load balancer and Fargate as compute.
-	LoadBalancedWebServiceType = "Load Balanced Web Service"
-	// RequestDrivenWebServiceType is a Request-Driven Web Service managed by AppRunner
-	RequestDrivenWebServiceType = "Request-Driven Web Service"
-	// BackendServiceType is a service that cannot be accessed from the internet but can be reached from other services.
-	BackendServiceType = "Backend Service"
-	// WorkerServiceType is a worker service that manages the consumption of messages.
-	WorkerServiceType = "Worker Service"
-)
-
-// ServiceTypes returns the list of supported service manifest types.
-func ServiceTypes() []string {
-	return []string{
-		RequestDrivenWebServiceType,
-		LoadBalancedWebServiceType,
-		BackendServiceType,
-		WorkerServiceType,
-	}
-}
-
 // Range contains either a Range or a range configuration for Autoscaling ranges.
 type Range struct {
 	Value       *IntRangeBand // Mutually exclusive with RangeConfig
 	RangeConfig RangeConfig
+}
+
+// ExposedPortsIndex holds exposed ports configuration.
+type ExposedPortsIndex struct {
+	WorkloadName      string                   // holds name of the main container
+	PortsForContainer map[string][]ExposedPort // holds exposed ports list for all the containers
+	ContainerForPort  map[uint16]string        // holds port to container mapping
+}
+
+func (idx ExposedPortsIndex) mainContainerPort() string {
+	return idx.containerPortDefinedBy(idx.WorkloadName)
+}
+
+// containerPortDefinedBy returns the explicitly defined container port, if there is no port exposed for the container then returns the empty string "".
+func (idx ExposedPortsIndex) containerPortDefinedBy(container string) string {
+	for _, portConfig := range idx.PortsForContainer[container] {
+		if portConfig.isDefinedByContainer {
+			return strconv.Itoa(int(portConfig.Port))
+		}
+	}
+	return ""
 }
 
 // IsEmpty returns whether Range is empty.
@@ -118,7 +122,7 @@ func (r *RangeConfig) IsEmpty() bool {
 }
 
 // Count is a custom type which supports unmarshaling yaml which
-// can either be of type int or type AdvantedCount.
+// can either be of type int or type AdvancedCount.
 type Count struct {
 	Value         *int          // 0 is a valid value, so we want the default value to be nil.
 	AdvancedCount AdvancedCount // Mutually exclusive with Value.
@@ -261,11 +265,11 @@ func (a *AdvancedCount) hasAutoscaling() bool {
 
 func (a *AdvancedCount) validScalingFields() []string {
 	switch a.workloadType {
-	case LoadBalancedWebServiceType:
+	case manifestinfo.LoadBalancedWebServiceType:
 		return []string{"cpu_percentage", "memory_percentage", "requests", "response_time"}
-	case BackendServiceType:
+	case manifestinfo.BackendServiceType:
 		return []string{"cpu_percentage", "memory_percentage", "requests", "response_time"}
-	case WorkerServiceType:
+	case manifestinfo.WorkerServiceType:
 		return []string{"cpu_percentage", "memory_percentage", "queue_delay"}
 	default:
 		return nil
@@ -274,11 +278,11 @@ func (a *AdvancedCount) validScalingFields() []string {
 
 func (a *AdvancedCount) hasScalingFieldsSet() bool {
 	switch a.workloadType {
-	case LoadBalancedWebServiceType:
+	case manifestinfo.LoadBalancedWebServiceType:
 		return !a.CPU.IsEmpty() || !a.Memory.IsEmpty() || !a.Requests.IsEmpty() || !a.ResponseTime.IsEmpty()
-	case BackendServiceType:
+	case manifestinfo.BackendServiceType:
 		return !a.CPU.IsEmpty() || !a.Memory.IsEmpty() || !a.Requests.IsEmpty() || !a.ResponseTime.IsEmpty()
-	case WorkerServiceType:
+	case manifestinfo.WorkerServiceType:
 		return !a.CPU.IsEmpty() || !a.Memory.IsEmpty() || !a.QueueScaling.IsEmpty()
 	default:
 		return !a.CPU.IsEmpty() || !a.Memory.IsEmpty() || !a.Requests.IsEmpty() || !a.ResponseTime.IsEmpty() || !a.QueueScaling.IsEmpty()
@@ -289,15 +293,15 @@ func (a *AdvancedCount) getInvalidFieldsSet() []string {
 	var invalidFields []string
 
 	switch a.workloadType {
-	case LoadBalancedWebServiceType:
+	case manifestinfo.LoadBalancedWebServiceType:
 		if !a.QueueScaling.IsEmpty() {
 			invalidFields = append(invalidFields, "queue_delay")
 		}
-	case BackendServiceType:
+	case manifestinfo.BackendServiceType:
 		if !a.QueueScaling.IsEmpty() {
 			invalidFields = append(invalidFields, "queue_delay")
 		}
-	case WorkerServiceType:
+	case manifestinfo.WorkerServiceType:
 		if !a.Requests.IsEmpty() {
 			invalidFields = append(invalidFields, "requests")
 		}
@@ -340,17 +344,6 @@ func (qs *QueueScaling) AcceptableBacklogPerTask() (int, error) {
 	return int(v), nil
 }
 
-// IsTypeAService returns if manifest type is service.
-func IsTypeAService(t string) bool {
-	for _, serviceType := range ServiceTypes() {
-		if t == serviceType {
-			return true
-		}
-	}
-
-	return false
-}
-
 // HTTPHealthCheckArgs holds the configuration to determine if the load balanced web service is healthy.
 // These options are specifiable under the "healthcheck" field.
 // See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-elasticloadbalancingv2-targetgroup.html.
@@ -365,57 +358,18 @@ type HTTPHealthCheckArgs struct {
 	GracePeriod        *time.Duration `yaml:"grace_period"`
 }
 
-func (h *HTTPHealthCheckArgs) isEmpty() bool {
-	return h.Path == nil && h.Port == nil && h.SuccessCodes == nil && h.HealthyThreshold == nil && h.UnhealthyThreshold == nil &&
-		h.Interval == nil && h.Timeout == nil && h.GracePeriod == nil
-}
-
 // HealthCheckArgsOrString is a custom type which supports unmarshaling yaml which
 // can either be of type string or type HealthCheckArgs.
 type HealthCheckArgsOrString struct {
-	HealthCheckPath *string
-	HealthCheckArgs HTTPHealthCheckArgs
-}
-
-// UnmarshalYAML overrides the default YAML unmarshaling logic for the HealthCheckArgsOrString
-// struct, allowing it to perform more complex unmarshaling behavior.
-// This method implements the yaml.Unmarshaler (v3) interface.
-func (hc *HealthCheckArgsOrString) UnmarshalYAML(value *yaml.Node) error {
-	if err := value.Decode(&hc.HealthCheckArgs); err != nil {
-		switch err.(type) {
-		case *yaml.TypeError:
-			break
-		default:
-			return err
-		}
-	}
-
-	if !hc.HealthCheckArgs.isEmpty() {
-		// Unmarshaled successfully to hc.HealthCheckArgs, reset hc.HealthCheckPath, and return.
-		hc.HealthCheckPath = nil
-		return nil
-	}
-
-	if err := value.Decode(&hc.HealthCheckPath); err != nil {
-		return errUnmarshalHealthCheckArgs
-	}
-	return nil
-}
-
-// IsEmpty returns true if there are no health check configuration set.
-func (hc *HealthCheckArgsOrString) IsEmpty() bool {
-	if hc.HealthCheckPath != nil {
-		return false
-	}
-	return hc.HealthCheckArgs.isEmpty()
+	Union[string, HTTPHealthCheckArgs]
 }
 
 // Path returns the default health check path if provided otherwise, returns the path from the advanced configuration.
 func (hc *HealthCheckArgsOrString) Path() *string {
-	if hc.HealthCheckPath != nil {
-		return hc.HealthCheckPath
+	if hc.IsBasic() {
+		return aws.String(hc.Basic)
 	}
-	return hc.HealthCheckArgs.Path
+	return hc.Advanced.Path
 }
 
 // NLBHealthCheckArgs holds the configuration to determine if the network load balanced web service is healthy.
@@ -427,6 +381,7 @@ type NLBHealthCheckArgs struct {
 	UnhealthyThreshold *int64         `yaml:"unhealthy_threshold"`
 	Timeout            *time.Duration `yaml:"timeout"`
 	Interval           *time.Duration `yaml:"interval"`
+	GracePeriod        *time.Duration `yaml:"grace_period"`
 }
 
 func (h *NLBHealthCheckArgs) isEmpty() bool {
@@ -448,4 +403,311 @@ func ParsePortMapping(s *string) (port *string, protocol *string, err error) {
 	default:
 		return nil, nil, fmt.Errorf("cannot parse port mapping from %s", *s)
 	}
+}
+
+type fromCFN struct {
+	Name *string `yaml:"from_cfn"`
+}
+
+func (cfg *fromCFN) isEmpty() bool {
+	return cfg.Name == nil
+}
+
+type stringOrFromCFN struct {
+	Plain   *string
+	FromCFN fromCFN
+}
+
+func (s stringOrFromCFN) isEmpty() bool {
+	return s.FromCFN.isEmpty() && s.Plain == nil
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler (v3) interface to override the default YAML unmarshalling logic.
+func (s *stringOrFromCFN) UnmarshalYAML(value *yaml.Node) error {
+	if err := value.Decode(&s.FromCFN); err != nil {
+		switch err.(type) {
+		case *yaml.TypeError:
+			break
+		default:
+			return err
+		}
+	}
+	if !s.FromCFN.isEmpty() { // Successfully unmarshalled to a environment import name.
+		return nil
+	}
+	if err := value.Decode(&s.Plain); err != nil { // Otherwise, try decoding the simple form.
+		return errors.New(`cannot unmarshal field to a string or into a map`)
+	}
+	return nil
+}
+
+func (cfg ImageWithPortAndHealthcheck) exposedPorts(workloadName string) []ExposedPort {
+	if cfg.Port == nil {
+		return nil
+	}
+	return []ExposedPort{
+		{
+			Port:                 aws.Uint16Value(cfg.Port),
+			Protocol:             "tcp",
+			ContainerName:        workloadName,
+			isDefinedByContainer: true,
+		},
+	}
+
+}
+
+func (cfg ImageWithHealthcheckAndOptionalPort) exposedPorts(workloadName string) []ExposedPort {
+	if cfg.Port == nil {
+		return nil
+	}
+	return []ExposedPort{
+		{
+			Port:                 aws.Uint16Value(cfg.Port),
+			Protocol:             "tcp",
+			ContainerName:        workloadName,
+			isDefinedByContainer: true,
+		},
+	}
+}
+
+// exportPorts returns any new ports that should be exposed given the application load balancer
+// configuration that's not part of the existing containerPorts.
+func (rr RoutingRule) exposedPorts(exposedPorts []ExposedPort, workloadName string) []ExposedPort {
+	if rr.TargetPort == nil {
+		return nil
+	}
+	targetContainer := workloadName
+	if rr.TargetContainer != nil {
+		targetContainer = aws.StringValue(rr.TargetContainer)
+	}
+	for _, exposedPort := range exposedPorts {
+		if aws.Uint16Value(rr.TargetPort) == exposedPort.Port {
+			return nil
+		}
+	}
+	return []ExposedPort{
+		{
+			Port:          aws.Uint16Value(rr.TargetPort),
+			Protocol:      "tcp",
+			ContainerName: targetContainer,
+		},
+	}
+}
+
+// exportPorts returns any new ports that should be exposed given the network load balancer
+// configuration that's not part of the existing containerPorts.
+func (cfg NetworkLoadBalancerListener) exposedPorts(exposedPorts []ExposedPort, workloadName string) ([]ExposedPort, error) {
+	if cfg.IsEmpty() {
+		return nil, nil
+	}
+	nlbPort, nlbProtocol, err := ParsePortMapping(cfg.Port)
+	if err != nil {
+		return nil, err
+	}
+
+	port, err := strconv.ParseUint(aws.StringValue(nlbPort), 10, 16)
+	if err != nil {
+		return nil, err
+	}
+	targetPort := uint16(port)
+	if cfg.TargetPort != nil {
+		targetPort = uint16(aws.IntValue(cfg.TargetPort))
+	}
+	targetProtocol := TCP
+	if nlbProtocol != nil {
+		// Expose TCP port for TLS listeners.
+		if protocol := aws.StringValue(nlbProtocol); !strings.EqualFold(protocol, TLS) {
+			targetProtocol = protocol
+		}
+	}
+	targetProtocol = strings.ToLower(targetProtocol)
+	for _, exposedPort := range exposedPorts {
+		if targetPort == exposedPort.Port && targetProtocol == exposedPort.Protocol {
+			return nil, nil
+		}
+	}
+	targetContainer := workloadName
+	if cfg.TargetContainer != nil {
+		targetContainer = aws.StringValue(cfg.TargetContainer)
+	}
+
+	return []ExposedPort{
+		{
+			Port:          targetPort,
+			Protocol:      targetProtocol,
+			ContainerName: targetContainer,
+		},
+	}, nil
+}
+
+func (sidecar SidecarConfig) exposedPorts(sidecarName string) ([]ExposedPort, error) {
+	if sidecar.Port == nil {
+		return nil, nil
+	}
+	sidecarPort, protocolPtr, err := ParsePortMapping(sidecar.Port)
+	if err != nil {
+		return nil, err
+	}
+	protocol := aws.StringValue(protocolPtr)
+	if protocolPtr == nil {
+		protocol = "tcp"
+	}
+	port, err := strconv.ParseUint(aws.StringValue(sidecarPort), 10, 16)
+	if err != nil {
+		return nil, err
+	}
+	return []ExposedPort{
+		{
+			Port:                 uint16(port),
+			Protocol:             strings.ToLower(protocol),
+			ContainerName:        sidecarName,
+			isDefinedByContainer: true,
+		},
+	}, nil
+}
+
+func sortExposedPorts(exposedPorts []ExposedPort) []ExposedPort {
+	// Sort the exposed ports so that the order is consistent and the integration test won't be flaky.
+	sort.Slice(exposedPorts, func(i, j int) bool {
+		return exposedPorts[i].Port < exposedPorts[j].Port
+	})
+	return exposedPorts
+}
+
+// Target returns target container and target port for the ALB configuration.
+// This method should be called only when ALB config is not empty.
+func (rr *RoutingRule) Target(exposedPorts ExposedPortsIndex) (targetContainer string, targetPort string, err error) {
+	// Route load balancer traffic to main container by default.
+	targetContainer = exposedPorts.WorkloadName
+	targetPort = exposedPorts.mainContainerPort()
+
+	rrTargetContainer := rr.TargetContainer
+	rrTargetPort := rr.TargetPort
+	if rrTargetContainer == nil && rrTargetPort == nil { // both targetPort and targetContainer are nil.
+		return
+	}
+
+	if rrTargetPort == nil { // when target_port is nil
+		if aws.StringValue(rrTargetContainer) != exposedPorts.WorkloadName {
+			targetContainer = aws.StringValue(rrTargetContainer)
+			targetPort = exposedPorts.containerPortDefinedBy(aws.StringValue(rrTargetContainer))
+			/* NOTE: When the `target_port` is empty, the intended target port should be the port that is explicitly exposed by the container. Consider the following example
+			```
+			http:
+			  target_container: nginx
+			sidecars:
+			  nginx:
+			    port: 81 # Explicitly exposed by the nginx container.
+			```
+			In this example, the target port for the ALB listener rule should be 81
+			*/
+		}
+		return
+	}
+
+	if rrTargetContainer == nil { // when target_container is nil
+		container, port := targetContainerFromTargetPort(exposedPorts, rrTargetPort)
+		targetPort = aws.StringValue(port)
+		// In general, containers aren't expected to be empty. But this condition is applied for extra safety.
+		if container != nil {
+			targetContainer = aws.StringValue(container)
+		}
+		return
+	}
+
+	// when both target_port and target_container are not nil
+	targetContainer = aws.StringValue(rrTargetContainer)
+	targetPort = template.StrconvUint16(aws.Uint16Value(rrTargetPort))
+	return
+}
+
+// targetContainerFromTargetPort returns target container and target port from the given target_port input.
+func targetContainerFromTargetPort(exposedPorts ExposedPortsIndex, port *uint16) (targetContainer *string, targetPort *string) {
+	// Route load balancer traffic to the target_port if mentioned.
+	targetPort = aws.String(template.StrconvUint16(aws.Uint16Value(port)))
+	// It shouldn’t be possible that container is empty for the given port as exposed port assigns container to all the ports, this is just for the extra safety.
+	if exposedPorts.ContainerForPort[aws.Uint16Value(port)] != "" {
+		targetContainer = aws.String(exposedPorts.ContainerForPort[aws.Uint16Value(port)])
+	}
+	return
+}
+
+// MainContainerPort returns the main container port.
+func (s *LoadBalancedWebService) MainContainerPort() string {
+	return strconv.FormatUint(uint64(aws.Uint16Value(s.ImageConfig.Port)), 10)
+}
+
+// MainContainerPort returns the main container port if given.
+func (s *BackendService) MainContainerPort() string {
+	port := template.NoExposedContainerPort
+	if s.BackendServiceConfig.ImageConfig.Port != nil {
+		port = strconv.FormatUint(uint64(aws.Uint16Value(s.BackendServiceConfig.ImageConfig.Port)), 10)
+	}
+	return port
+}
+
+func prepareParsedExposedPortsMap(exposedPorts []ExposedPort) (map[string][]ExposedPort, map[uint16]string) {
+	parsedContainerMap := make(map[string][]ExposedPort)
+	parsedExposedPortMap := make(map[uint16]string)
+	for _, exposedPort := range exposedPorts {
+		parsedContainerMap[exposedPort.ContainerName] = append(parsedContainerMap[exposedPort.ContainerName], exposedPort)
+		parsedExposedPortMap[exposedPort.Port] = exposedPort.ContainerName
+	}
+	return parsedContainerMap, parsedExposedPortMap
+}
+
+// Target returns target container and target port for a NLB listener configuration.
+func (listener NetworkLoadBalancerListener) Target(exposedPorts ExposedPortsIndex) (targetContainer string, targetPort string, err error) {
+	// Parse listener port and protocol.
+	port, _, err := ParsePortMapping(listener.Port)
+	if err != nil {
+		return "", "", err
+	}
+	// By default, the target port is the same as listener port.
+	targetPort = aws.StringValue(port)
+	targetContainer = exposedPorts.WorkloadName
+	if listener.TargetContainer == nil && listener.TargetPort == nil { // both targetPort and targetContainer are nil.
+		return
+	}
+
+	if listener.TargetPort == nil { // when target_port is nil
+		if aws.StringValue(listener.TargetContainer) != exposedPorts.WorkloadName {
+			targetContainer = aws.StringValue(listener.TargetContainer)
+			for _, portConfig := range exposedPorts.PortsForContainer[targetContainer] {
+				if portConfig.isDefinedByContainer {
+					targetPort = strconv.Itoa(int(portConfig.Port))
+					/* NOTE: When the `target_port` is empty, the intended target port should be the port that is explicitly exposed by the container. Consider the following example
+					```
+					http:
+					  target_container: nginx
+					  target_port: 83 # Implicitly exposed by the nginx container
+					nlb:
+					  port: 80/tcp
+					  target_container: nginx
+					sidecars:
+					  nginx:
+					    port: 81 # Explicitly exposed by the nginx container.
+					```
+					In this example, the target port for the NLB listener should be 81
+					*/
+				}
+			}
+		}
+		return
+	}
+
+	if listener.TargetContainer == nil { // when target_container is nil
+		container, port := targetContainerFromTargetPort(exposedPorts, uint16P(uint16(aws.IntValue(listener.TargetPort))))
+		targetPort = aws.StringValue(port)
+		// In general, containers aren't expected to be empty. But this condition is applied for extra safety.
+		if container != nil {
+			targetContainer = aws.StringValue(container)
+		}
+		return
+	}
+
+	// when both target_port and target_container are not nil
+	targetContainer = aws.StringValue(listener.TargetContainer)
+	targetPort = template.StrconvUint16(uint16(aws.IntValue(listener.TargetPort)))
+	return
 }

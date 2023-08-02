@@ -5,18 +5,18 @@ package exec_test
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/aws/copilot-cli/e2e/internal/client"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("exec flow", func() {
-	Context("when creating a new app", func() {
+	Context("when creating a new app", Ordered, func() {
 		var (
 			initErr error
 		)
@@ -47,7 +47,7 @@ var _ = Describe("exec flow", func() {
 		})
 	})
 
-	Context("when adding a new environment", func() {
+	Context("when adding a new environment", Ordered, func() {
 		var (
 			testEnvInitErr error
 		)
@@ -55,7 +55,7 @@ var _ = Describe("exec flow", func() {
 			_, testEnvInitErr = cli.EnvInit(&client.EnvInitRequest{
 				AppName: appName,
 				EnvName: envName,
-				Profile: "default",
+				Profile: envName,
 			})
 		})
 
@@ -64,7 +64,7 @@ var _ = Describe("exec flow", func() {
 		})
 	})
 
-	Context("when deploying the environment", func() {
+	Context("when deploying the environment", Ordered, func() {
 		var envDeployErr error
 		BeforeAll(func() {
 			_, envDeployErr = cli.EnvDeploy(&client.EnvDeployRequest{
@@ -78,7 +78,7 @@ var _ = Describe("exec flow", func() {
 		})
 	})
 
-	Context("when adding a svc", func() {
+	Context("when adding a svc", Ordered, func() {
 		var (
 			svcInitErr error
 		)
@@ -116,7 +116,7 @@ var _ = Describe("exec flow", func() {
 		})
 	})
 
-	Context("when deploying svc", func() {
+	Context("when deploying svc", Ordered, func() {
 		const newContent = "HELP I AM TRAPPED INSIDE A SHELL"
 		var (
 			appDeployErr error
@@ -157,6 +157,7 @@ var _ = Describe("exec flow", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(len(svc.Routes)).To(Equal(1))
+			Expect(len(svc.ServiceConnects)).To(Equal(0))
 
 			route := svc.Routes[0]
 			Expect(route.Environment).To(Equal(envName))
@@ -168,7 +169,7 @@ var _ = Describe("exec flow", func() {
 			}, "60s", "1s").Should(Equal(200))
 			// Read the response - our deployed service should return a body with its
 			// name as the value.
-			bodyBytes, err := ioutil.ReadAll(resp.Body)
+			bodyBytes, err := io.ReadAll(resp.Body)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(bodyBytes)).To(Equal(svcName))
 		})
@@ -218,7 +219,7 @@ var _ = Describe("exec flow", func() {
 				}, "60s", "1s").Should(Equal(200))
 				// Our deployed service should return a body with the new content
 				// as the value.
-				bodyBytes, err := ioutil.ReadAll(resp.Body)
+				bodyBytes, err := io.ReadAll(resp.Body)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(strings.TrimSpace(string(bodyBytes))).To(Equal(newContent))
 				time.Sleep(3 * time.Second)
@@ -261,7 +262,7 @@ var _ = Describe("exec flow", func() {
 		// })
 	})
 
-	Context("when running a one-off task", func() {
+	Context("when running a one-off task", Ordered, func() {
 		var (
 			taskRunErr error
 		)

@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/deploy/upload/customresource"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/template"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,6 +55,7 @@ func Test_App_Infrastructure(t *testing.T) {
 	deployer := cloudformation.New(sess, cloudformation.WithProgressTracker(os.Stderr))
 	cfClient := awsCF.New(sess)
 	require.NoError(t, err)
+	version.Version = "v1.28.0"
 
 	t.Run("Deploys Application Admin Roles to CloudFormation and Creates StackSet", func(t *testing.T) {
 		app := config.Application{Name: randStringBytes(10), AccountID: callerInfo.Account}
@@ -63,7 +66,7 @@ func Test_App_Infrastructure(t *testing.T) {
 		roleStackOutput, err := cfClient.DescribeStacks(&awsCF.DescribeStacksInput{
 			StackName: aws.String(appRoleStackName),
 		})
-
+		require.Error(t, err)
 		require.True(t, len(roleStackOutput.Stacks) == 0, "Stack %s should not exist.", appRoleStackName)
 
 		// Make sure we delete the stacks after the test is done
@@ -84,7 +87,7 @@ func Test_App_Infrastructure(t *testing.T) {
 		err = deployer.DeployApp(&deploy.CreateAppInput{
 			Name:      app.Name,
 			AccountID: app.AccountID,
-			Version:   deploy.LatestAppTemplateVersion,
+			Version:   version.LatestTemplateVersion(),
 		})
 		require.NoError(t, err)
 
@@ -119,8 +122,8 @@ func Test_App_Infrastructure(t *testing.T) {
 					fmt.Sprintf("AdministrationRoleARN should be named {app}-adminrole but was %s", *output.OutputValue))
 			},
 			"TemplateVersion": func(output *awsCF.Output) {
-				require.Equal(t, *output.OutputValue, deploy.LatestAppTemplateVersion,
-					fmt.Sprintf("TemplateVersion should be %s but was %s", deploy.LatestAppTemplateVersion, *output.OutputValue))
+				require.Equal(t, *output.OutputValue, version.LatestTemplateVersion(),
+					fmt.Sprintf("TemplateVersion should be %s but was %s", version.LatestTemplateVersion(), *output.OutputValue))
 			},
 		}
 		require.True(t, len(deployedStack.Outputs) == len(expectedResultsForKey),
@@ -174,13 +177,13 @@ func Test_App_Infrastructure(t *testing.T) {
 		roleStackOutput, err := cfClient.DescribeStacks(&awsCF.DescribeStacksInput{
 			StackName: aws.String(appRoleStackName),
 		})
-
+		require.Error(t, err)
 		require.True(t, len(roleStackOutput.Stacks) == 0, "Stack %s should not exist.", appRoleStackName)
 
 		err = deployer.DeployApp(&deploy.CreateAppInput{
 			Name:      app.Name,
 			AccountID: app.AccountID,
-			Version:   deploy.LatestAppTemplateVersion,
+			Version:   version.LatestTemplateVersion(),
 		})
 		require.NoError(t, err)
 
@@ -216,6 +219,7 @@ func Test_App_Infrastructure(t *testing.T) {
 				EnvRegion:    *sess.Config.Region,
 			},
 		)
+		require.NoError(t, err)
 
 		// Query using our GetRegionalAppResources function.
 		resources, err := deployer.GetRegionalAppResources(&app)
@@ -254,8 +258,8 @@ func Test_App_Infrastructure(t *testing.T) {
 					"PipelineBucket should not be nil")
 			},
 			"TemplateVersion": func(output *awsCF.Output) {
-				require.Equal(t, *output.OutputValue, deploy.LatestAppTemplateVersion,
-					fmt.Sprintf("TemplateVersion should be %s but was %s", deploy.LatestAppTemplateVersion, *output.OutputValue))
+				require.Equal(t, *output.OutputValue, version.LatestTemplateVersion(),
+					fmt.Sprintf("TemplateVersion should be %s but was %s", version.LatestTemplateVersion(), *output.OutputValue))
 			},
 			"ECRRepomysvc": func(output *awsCF.Output) {
 				require.True(t,
@@ -267,6 +271,12 @@ func Test_App_Infrastructure(t *testing.T) {
 				require.True(t,
 					strings.HasSuffix(*output.OutputValue, fmt.Sprintf("repository/%s/mysvc-frontend", app.Name)),
 					fmt.Sprintf("ECRRepomysvcDASHfrontend should be suffixed with repository/{app}/mysvc but was %s", *output.OutputValue))
+			},
+			"StackSetOpId": func(output *awsCF.Output) {
+				opID, err := strconv.Atoi(*output.OutputValue)
+				require.NoError(t, err)
+				require.GreaterOrEqual(t, opID, 1,
+					fmt.Sprintf("StackSetOpId should be > 1 but was %s", *output.OutputValue))
 			},
 		}
 		require.True(t, len(deployedStack.Outputs) == len(expectedResultsForKey),
@@ -330,7 +340,7 @@ func Test_App_Infrastructure(t *testing.T) {
 		err = deployer.DeployApp(&deploy.CreateAppInput{
 			Name:      app.Name,
 			AccountID: app.AccountID,
-			Version:   deploy.LatestAppTemplateVersion,
+			Version:   version.LatestTemplateVersion(),
 		})
 		require.NoError(t, err)
 
@@ -356,6 +366,7 @@ func Test_App_Infrastructure(t *testing.T) {
 			EnvAccountID: callerInfo.Account,
 			EnvRegion:    *sess.Config.Region,
 		})
+		require.NoError(t, err)
 
 		stackInstances, err = cfClient.ListStackInstances(&awsCF.ListStackInstancesInput{
 			StackSetName: aws.String(appStackSetName),
@@ -378,6 +389,7 @@ func Test_App_Infrastructure(t *testing.T) {
 // is failing to be spun up because you've reached some limits, try
 // switching your default region by running aws configure.
 func Test_Environment_Deployment_Integration(t *testing.T) {
+	version.Version = "v1.28.0"
 	sess, err := testSession(nil)
 	require.NoError(t, err)
 	deployer := cloudformation.New(sess, cloudformation.WithProgressTracker(os.Stderr))
@@ -392,13 +404,13 @@ func Test_Environment_Deployment_Integration(t *testing.T) {
 	envName := randStringBytes(10)
 	appName := randStringBytes(10)
 	bucketName := randStringBytes(10)
-	environmentToDeploy := deploy.CreateEnvironmentInput{
+	environmentToDeploy := stack.EnvConfig{
 		Name: envName,
 		App: deploy.AppInformation{
 			Name:                appName,
 			AccountPrincipalARN: id.RootUserARN,
 		},
-		Version: deploy.LatestEnvTemplateVersion,
+		Version: version.LatestTemplateVersion(),
 	}
 	envStackName := fmt.Sprintf("%s-%s", environmentToDeploy.App.Name, environmentToDeploy.Name)
 
@@ -406,6 +418,7 @@ func Test_Environment_Deployment_Integration(t *testing.T) {
 	output, err := cfClient.DescribeStacks(&awsCF.DescribeStacksInput{
 		StackName: aws.String(envStackName),
 	})
+	require.Error(t, err)
 	require.True(t, len(output.Stacks) == 0, "Stack %s should not exist.", envStackName)
 
 	// Create a temporary S3 bucket to store custom resource scripts.
@@ -433,11 +446,12 @@ func Test_Environment_Deployment_Integration(t *testing.T) {
 	}()
 
 	t.Run("Deploys bootstrap resources for the environment to CloudFormation", func(t *testing.T) {
+		bucketARN := fmt.Sprintf("arn:aws:s3:::%s", bucketName)
 		environmentToDeploy.ArtifactBucketKeyARN = "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
-		environmentToDeploy.ArtifactBucketARN = fmt.Sprintf("arn:aws:s3:::%s", bucketName)
+		environmentToDeploy.ArtifactBucketARN = bucketARN
 
 		// Deploy the environment and wait for it to be complete
-		require.NoError(t, deployer.CreateAndRenderEnvironment(&environmentToDeploy))
+		require.NoError(t, deployer.CreateAndRenderEnvironment(stack.NewBootstrapEnvStackConfig(&environmentToDeploy), bucketARN))
 
 		// Ensure that the new stack exists
 		output, err := cfClient.DescribeStacks(&awsCF.DescribeStacksInput{
@@ -501,12 +515,12 @@ func Test_Environment_Deployment_Integration(t *testing.T) {
 		}
 
 		// Deploy the environment and wait for it to be complete.
-		oldParams, err := deployer.EnvironmentParameters(environmentToDeploy.App.Name, environmentToDeploy.Name)
+		oldParams, err := deployer.DeployedEnvironmentParameters(environmentToDeploy.App.Name, environmentToDeploy.Name)
 		require.NoError(t, err)
 		lastForceUpdateID, err := deployer.ForceUpdateOutputID(environmentToDeploy.App.Name, environmentToDeploy.Name)
 		require.NoError(t, err)
-		conf := stack.NewEnvConfigFromExistingStack(&environmentToDeploy, lastForceUpdateID, oldParams)
-
+		conf, err := stack.NewEnvConfigFromExistingStack(&environmentToDeploy, lastForceUpdateID, oldParams)
+		require.NoError(t, err)
 		// Deploy the environment and wait for it to be complete.
 		require.NoError(t, deployer.UpdateAndRenderEnvironment(conf, environmentToDeploy.ArtifactBucketARN))
 
@@ -520,7 +534,7 @@ func Test_Environment_Deployment_Integration(t *testing.T) {
 		deployedStack := output.Stacks[0]
 		expectedResultsForKey := map[string]func(*awsCF.Output){
 			"EnabledFeatures": func(output *awsCF.Output) {
-				require.Equal(t, ",,,,", aws.StringValue(output.OutputValue), "no env features enabled by default")
+				require.Equal(t, ",,,,,", aws.StringValue(output.OutputValue), "no env features enabled by default")
 			},
 			"EnvironmentManagerRoleARN": func(output *awsCF.Output) {
 				require.Equal(t,

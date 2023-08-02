@@ -22,7 +22,7 @@ CodePipeline のような自動化されたリリースツールは、あなた�
 Copilot はいくつかのコマンドで CodePipeline をセットアップします。作業を始める前に、まずは最終的に作成される Pipeline の構成を見ていきましょう。Pipeline は次に挙げる基本的な構造を持っています。
 
 1. __Source Stage__ - 設定した GitHub、Bitbucket、あるいは CodeCommit リポジトリにプッシュすると、Pipeline の実行が開始されます。
-2. __Build Stage__ - リポジトリからコードがダウンロードされると、Service 用のコンテナイメージがビルドされ、すべての Environment の Amazon ECR リポジトリにプッシュされます。加えて、[Addon](../developing/addons/modeling.ja.md) テンプレートや、 Lambda 関数 zip ファイル、[環境変数ファイル](../developing/environment-variables.ja.md)などのすべての入力ファイルが S3 にアップロードされます。
+2. __Build Stage__ - リポジトリからコードがダウンロードされると、Service 用のコンテナイメージがビルドされ、すべての Environment の Amazon ECR リポジトリにプッシュされます。加えて、[Addon](../developing/addons/workload.ja.md) テンプレートや、 Lambda 関数 zip ファイル、[環境変数ファイル](../developing/environment-variables.ja.md)などのすべての入力ファイルが S3 にアップロードされます。
 
 ソースコードがリポジトリホストから pull された後に、 Service のコンテナイメージがビルドされ、 各環境の ECR リポジトリにパブリッシュされます。加えて、Addon テンプレート、Lambda 関数 zip ファイル、環境変数ファイルなどのすべての入力ファイルが S3　にアップロードされます。
 
@@ -184,3 +184,6 @@ stages:
     -
       name: prod
 ```
+
+!!! info
+    AWS の Nathan Peck が素晴らしい例を提供しています。その例では `test_commands` に特に注目しています：https://aws.amazon.com/blogs/containers/automatically-deploying-your-container-application-with-aws-copilot/

@@ -19,21 +19,22 @@ $ copilot job deploy
 
 ```
   -a, --app string                     Name of the application.
+      --diff                           Compares the generated CloudFormation template to the deployed stack.
   -e, --env string                     Name of the environment.
   -h, --help                           help for deploy
   -n, --name string                    Name of the job.
-      --no-rollback bool               Optional. Disable automatic stack
+      --no-rollback                    Optional. Disable automatic stack
                                        rollback in case of deployment failure.
                                        We do not recommend using this flag for a
                                        production environment.
       --resource-tags stringToString   Optional. Labels with a key and value separated by commas.
                                        Allows you to categorize resources. (default [])
-      --tag string                     Optional. The container image tag..
+      --tag string                     Optional. The tag for the container images Copilot builds from Dockerfiles.
 ```
 
 !!!info
-`--no-rollback` フラグは、サービスのダウンタイムを招く可能性があるため、本番環境にデプロイする場合は ***お勧めしません*** 。
-自動スタックロールバックが無効になっている場合に、デプロイに失敗すると、手動でスタックを開始する必要があります。次のデプロイの前に AWS コンソールまたは AWS CLI を利用してスタックのスタックロールバックを手動で開始する必要があります。
+`--no-rollback` フラグは、サービスのダウンタイムを招く可能性があるため、本番環境にデプロイする場合は ***お勧めしません***。
+スタックの自動ロールバックが無効な場合にデプロイに失敗すると、次のデプロイの前に AWS コンソールまたは AWS CLI を使用してスタックのロールバックを手動で開始する必要がある場合があります。
 
 ## 実行例
 
@@ -46,3 +47,23 @@ $ copilot job deploy --name report-gen --env test
 ```console
 $ copilot job deploy --resource-tags source/revision=bb133e7,deployment/initiator=manual`
 ```
+
+`--diff` を使用して、デプロイを実行する前に、変更される内容を確認します。
+```console
+$ copilot job deploy --diff
+~ Resources:
+    ~ TaskDefinition:
+        ~ Properties:
+            ~ ContainerDefinitions:
+                ~ - (changed item)
+                  ~ Environment:
+                      (4 unchanged items)
+                      + - Name: LOG_LEVEL
+                      +   Value: "info"
+
+Continue with the deployment? (y/N)
+```
+
+!!!info "`copilot job package --diff`"
+    デプロイを実行する必要がなく、差分だけを確認したい場合があります。
+    `copilot job package --diff` は差分を表示してコマンドが終了します。

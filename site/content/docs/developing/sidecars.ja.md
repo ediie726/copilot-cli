@@ -37,7 +37,7 @@ http:
   path: 'api'
   healthcheck: '/api/health-check'
   # ロードバランサーのターゲットコンテナは Service のコンテナの代わりにサイドカーの'nginx'を指定しています。
-  targetContainer: 'nginx'
+  target_container: 'nginx'
 
 cpu: 256
 memory: 512
@@ -46,7 +46,8 @@ count: 1
 sidecars:
   nginx:
     port: 80
-    image: 1234567890.dkr.ecr.us-west-2.amazonaws.com/reverse-proxy:revision_1
+    image:
+      build: src/reverseproxy/Dockerfile
     variables:
       NGINX_PORT: 80
 ```
@@ -110,7 +111,7 @@ service:
       exporters: [otlp]
 ```
 
-X-Ray トレースの書き込みには、以下のような追加の IAM 権限が必要です。[公開されているドキュメント](../developing/addons/modeling.ja.md)に従ってこれを Addon に含めてください。
+X-Ray トレースの書き込みには、以下のような追加の IAM 権限が必要です。[公開されているドキュメント](./addons/workload.ja.md)に従ってこれを Addon に含めてください。
 
 ``` yaml
 Resources:
@@ -181,7 +182,7 @@ logging:
     log_stream_prefix: copilot/
 ```
 
-FireLens がログを転送するためにタスクロールに対して必要なアクセス許可を追加で与える必要があるかもしれません。[Addon](../developing/addons/modeling.ja.md) のなかで許可を追加できます。例えば以下のように設定できます。
+FireLens がログを転送するためにタスクロールに対して必要なアクセス許可を追加で与える必要があるかもしれません。[Addon](./addons/workload.ja.md) のなかで許可を追加できます。例えば以下のように設定できます。
 
 ``` yaml
 Resources:
@@ -207,5 +208,3 @@ Outputs:
 !!!info
     FireLens ログドライバーは主となるコンテナのログを様々な宛先へルーティングできる一方で、 [`svc logs`](../commands/svc-logs.ja.md) コマンドは CloudWatch Logs で Copilot Service のために作成したロググループに送信された場合のみログをトラックできます。
 
-!!!info
-    ** この機能をより簡単かつパワフルにする予定です！**現時点ではサイドカーはリモートイメージの利用のみをサポートしており、ユーザーはローカルのサイドカーイメージをビルドしてプッシュする必要があります。しかしローカルのイメージや Dockerfile をサポートする予定です。さらに FireLens 自身については主となるコンテナだけでなく他のサイドカーのログもルーティングできるようになる予定です。
